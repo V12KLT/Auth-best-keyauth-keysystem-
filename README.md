@@ -1,3 +1,5 @@
+JOIN ARE DISCORD FOR ALL NEW VERSIONS & INFO -> https://discord.gg/x2P52WwqWf
+
 [HOW TO USE.md](https://github.com/user-attachments/files/24622491/HOW.TO.USE.md)
 # Auth Key System Documentation
 
