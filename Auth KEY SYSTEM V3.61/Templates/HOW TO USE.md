@@ -6,16 +6,8 @@ Welcome to the **Auth Key System**. This documentation covers how to connect, au
 1. [Overview](#overview)
 2. [Prerequisites](#prerequisites)
 3. [Features](#features)
-4. [Client Implementation (Languages)](#client-implementation)
-    - [Python](#python)
-    - [C#](#c-sharp)
-    - [C++](#c-plus-plus)
-    - [JavaScript (Node.js)](#javascript)
-    - [Go](#go)
-    - [Java](#java)
-    - [PHP](#php)
-    - [Ruby](#ruby)
-    - [Rust](#rust)
+4. [Security Features](#security-features)
+5. [Client Implementation (Languages)](#client-implementation)
 
 ---
 
@@ -26,7 +18,7 @@ The Auth Key System uses a **secure socket connection (SSL/TLS)** to validate li
 - **Challenge-Response Security**: Prevents replay attacks by issuing a cryptographic challenge that the client must sign.
 - **Encrypted Traffic**: All communication is encrypted via TLS 1.2/1.3.
 
-**Server Address**: `socket.keyauth.shop`  
+**Server Address**: Obfuscated in templates (XOR-encrypted at rest)
 **Port**: `3389`
 
 ---
@@ -38,7 +30,7 @@ Before implementing the client, you need your **Project ID**.
 2. Go to **Project Settings**.
 3. Copy your `Project ID` (it will look like a 32-character hex string, e.g., `e0bc069afb6a0e4de767700dab2e8b90`).
 
-You will replace `ENTER_PROJECT_ID_HERE` with this ID in the code examples below.
+You will replace `ENTER_PROJECT_ID_HERE` with this ID in the code.
 
 ---
 
@@ -47,143 +39,73 @@ You will replace `ENTER_PROJECT_ID_HERE` with this ID in the code examples below
 - **License Key Login**: Users log in with a single license key.
 - **Hardware Locking**: The system automatically grabs the user's HWID (UUID) and locks the key to it.
 - **Expiration Management**: Keys can have durations (1 day, 1 week, etc.) or be permanent.
-- **Session Security**: The server issues a random challenge. The client must HMAC-SHA256 hash this challenge with the Key to prove ownership without sending the key securely again (Double Verification).
+- **Session Security**: The server issues a random challenge. The client must HMAC-SHA256 hash this challenge with the Key to prove ownership (Double Verification).
+
+---
+
+## Security Features
+
+Every template now includes production-grade security:
+
+| Feature | Description |
+|---------|-------------|
+| **XOR String Obfuscation** | Server host/port are XOR-encrypted at rest, decoded only at runtime |
+| **Encrypted Token Storage** | Auth tokens stored XOR-encrypted in memory with FNV-1a integrity canary |
+| **Anti-Debug** | Detects debuggers (IsDebuggerPresent, JDWP, xdebug, etc.) |
+| **Anti-Process** | Scans for known reverse engineering tools (x64dbg, IDA, Wireshark, dnSpy, etc.) |
+| **Session Validation** | Background thread re-verifies session every 60 seconds |
+| **Stealth Exit** | Exits silently without error messages on tampering detection |
+| **Token Integrity** | FNV-1a canary detects memory tampering of stored tokens |
+| **No Info Leakage** | Generic error messages, no details about what failed |
+
+### C++ Exclusive Features
+- Compile-time string obfuscation (strings never appear in plaintext in the binary)
+- Hidden API resolution via PE export hash (APIs don't show in import table)
+- Native Windows TLS via SSPI/SChannel (no OpenSSL dependency)
+- Thread hiding from debuggers via NtSetInformationThread
+- Stealth process termination via resolved TerminateProcess
 
 ---
 
 ## Client Implementation
 
 Usage for all languages follows this flow:
-1. Connect to `socket.keyauth.shop:3389`.
+1. Connect to the server on port `3389` via TLS.
 2. Send byte "2" to initiate handshake.
 3. Wait 200ms.
 4. Send `PROJECT_ID|KEY|HWID`.
 5. If server returns `CHALLENGE|ID|NONCE`, calculate `HMAC_SHA256(Key, NONCE)` and send back `RESPONSE|ID|SIGNATURE`.
-6. If server returns `ACCESS|...`, login is successful.
+6. If server returns `ACCESS|...`, login is successful. Token is stored encrypted.
+7. Session validation thread starts automatically.
 
 ### Python
-Requires: `pip install wmi` (Windows)
+Requires: `pip install colorama` (optional)
 
-```python
-# See Templates/Python.py for full code
-import ssl, wmi, hashlib, sys, time, hmac
-from socket import socket, AF_INET, SOCK_STREAM
-
-def authenticate(PROJECT_ID, key):
-    # ... (implementation details)
-    # 1. Connect SSL Socket
-    # 2. Send handshake
-    # 3. Handle ChallengeResponse
-```
-
-### C#
+### C# (.NET)
 Requires: `.NET Framework 4.7.2+` or `.NET Core`
 
-```csharp
-// See Templates/csharp.cs for full code
-using System.Net.Sockets;
-using System.Net.Security;
+### C++ (Windows)
+Requires: C++17 compiler, links against `ws2_32.lib`, `secur32.lib`, `bcrypt.lib`, `crypt32.lib`, `advapi32.lib`
+No external dependencies (uses Windows-native SSPI/SChannel for TLS).
+Define `KEYAUTH_HEADER_ONLY` to use as a header-only library.
 
-public class KeyAuth {
-    public static bool Authenticate(string key) {
-        // ... (implementation details)
-    }
-}
-```
-
-### C++
-Requires: `OpenSSL` libraries linked.
-
-```cpp
-// See Templates/cpp.cpp for full code
-#include <openssl/ssl.h>
-#include <openssl/hmac.h>
-
-bool authenticate(const std::string& key) {
-    // ... (implementation details)
-}
-```
-
-### JavaScript
-Requires: Node.js
-
-```javascript
-// See Templates/js.js for full code
-const tls = require('tls');
-const crypto = require('crypto');
-
-function authenticate(key) {
-    // ... (implementation details)
-}
-```
+### JavaScript (Node.js)
+Requires: Node.js (uses built-in `tls`, `crypto` modules)
 
 ### Go
 No external dependencies.
 
-```go
-// See Templates/go.go for full code
-import (
-    "crypto/hmac"
-    "crypto/tls"
-    // ...
-)
-
-func authenticate(key string) bool {
-    // ...
-}
-```
-
 ### Java
 Standard Java Library (JDK 8+)
-
-```java
-// See Templates/java.java for full code
-import javax.net.ssl.*;
-
-public class KeyAuth {
-    public static boolean authenticate(String key) {
-        // ...
-    }
-}
-```
 
 ### PHP
 Requires: `openssl` extension enabled.
 
-```php
-// See Templates/php.php for full code
-<?php
-function authenticate($key) {
-    // ...
-}
-?>
-```
-
 ### Ruby
-Standard Library.
-
-```ruby
-// See Templates/ruby.rb for full code
-require 'socket'
-require 'openssl'
-
-def authenticate(key)
-    # ...
-end
-```
+Standard Library (OpenSSL).
 
 ### Rust
 Requires: `native-tls`, `hmac`, `sha2`, `hex` crates.
-
-```rust
-// See Templates/rust.rs for full code
-use native_tls::TlsConnector;
-use hmac::{Hmac, Mac};
-
-fn authenticate(key: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    // ...
-}
-```
 
 ---
 
