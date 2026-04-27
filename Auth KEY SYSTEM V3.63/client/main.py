@@ -71,7 +71,7 @@ def manage_projects():
     client = get_client()
     username = get_username()
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("PROJECT MANAGEMENT")
         print()
         print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}Create Project")
@@ -171,7 +171,7 @@ def start():
     check_and_update()
     
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("AUTHENTICATION")
         print()
         print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}Create Account")
@@ -194,7 +194,7 @@ def start():
                     time.sleep(2)
                     break
                 
-                os.system("cls")
+                os.system("cls" if os.name == "nt" else "clear")
                 print_banner("PAST LOGINS")
                 print()
                 for i, login in enumerate(past_logins, 1):
