@@ -11,7 +11,7 @@ except ImportError:
 
 def ban_pepole():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("BAN USER")
     print()
     
@@ -37,7 +37,7 @@ def ban_pepole():
 
 def remove_bans():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("REMOVE BANS")
     print()
     
@@ -63,7 +63,7 @@ def remove_bans():
 
 def list_bans():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("BAN LIST")
     
     client.send("list_bans".encode("utf-8"))
@@ -88,7 +88,7 @@ def list_bans():
 def ban_management_menu():
     client = get_client()
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("BAN MANAGEMENT")
         print()
         print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}Ban User")
