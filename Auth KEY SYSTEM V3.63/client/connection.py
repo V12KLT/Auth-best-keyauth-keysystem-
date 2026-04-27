@@ -1,9 +1,10 @@
 import ssl
 import requests
-import wmi
 import hashlib
 import threading
 import time
+import platform
+import subprocess
 from socket import AF_INET, SOCK_STREAM, socket
 
 try:
@@ -16,12 +17,41 @@ client = None
 SERVER_CERT_FINGERPRINT = None
 
 def get_motherboard_serial():
+    system = platform.system()
     try:
-        c = wmi.WMI()
-        for item in c.Win32_ComputerSystemProduct():
-            return item.UUID
+        if system == "Windows":
+            result = subprocess.check_output(
+                ["wmic", "csproduct", "get", "UUID"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip().splitlines()
+            for line in result:
+                line = line.strip()
+                if line and line != "UUID":
+                    return line
+        elif system == "Linux":
+            try:
+                with open("/etc/machine-id", "r") as f:
+                    return f.read().strip()
+            except Exception:
+                result = subprocess.check_output(
+                    ["cat", "/proc/cpuinfo"],
+                    stderr=subprocess.DEVNULL
+                ).decode()
+                for line in result.splitlines():
+                    if "Serial" in line:
+                        return line.split(":")[-1].strip()
+        elif system == "Darwin":
+            result = subprocess.check_output(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                stderr=subprocess.DEVNULL
+            ).decode()
+            for line in result.splitlines():
+                if "IOPlatformUUID" in line:
+                    return line.split('"')[-2]
     except Exception:
-        return "UNKNOWN-HWID"
+        pass
+    raw = platform.node() + platform.processor() + platform.machine()
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 motherboard = get_motherboard_serial()
 
