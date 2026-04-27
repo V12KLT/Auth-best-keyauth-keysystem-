@@ -32,7 +32,7 @@ def set_project_name(new_name):
 
 def create_project():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("CREATE NEW PROJECT")
     print()
     
@@ -64,7 +64,7 @@ def select_project():
              time.sleep(2)
              return False
 
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("YOUR PROJECTS")
         print()
         
@@ -107,7 +107,7 @@ def delete_project_ui():
             name, pid = proj.split(":")
             project_list.append((name, pid))
     
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("DELETE PROJECT")
     print()
     
@@ -141,7 +141,7 @@ def project_settings_menu():
     global project_id
     client = get_client()
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("PROJECT SETTINGS")
         print(f"\n{Fore.CYAN}  Current Project ID: {Fore.GREEN}{project_id}{Fore.RESET}")
         print()
@@ -177,7 +177,7 @@ def project_settings_menu():
             
         elif choice == "3":
              while True:
-                os.system("cls")
+                os.system("cls" if os.name == "nt" else "clear")
                 print_banner("MANAGE PERMISSIONS")
                 print()
                 print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}Add Permission (Admin/Viewer)")
@@ -242,7 +242,7 @@ def project_settings_menu():
 
 def Statistics():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("PROJECT STATISTICS")
     
     client.send("Statistics".encode("utf-8"))
@@ -282,7 +282,7 @@ def Statistics():
 def variable_management_menu():
     client = get_client()
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("APP VARIABLES")
         print()
         
@@ -328,7 +328,7 @@ def variable_management_menu():
 
 def recent_activity():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("RECENT ACTIVITY")
     
     client.send("recent_activity".encode("utf-8"))
@@ -353,7 +353,7 @@ def recent_activity():
 def ip_whitelist_menu():
     client = get_client()
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("IP WHITELIST MANAGEMENT")
         print()
         
@@ -394,7 +394,7 @@ def ip_whitelist_menu():
 
 def analytics_menu():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("USAGE ANALYTICS")
     print()
     
@@ -431,7 +431,7 @@ def analytics_menu():
 
 def get_project_id_for_code():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("PROJECT ID")
     
     client.send("get_project_id".encode("utf-8"))
