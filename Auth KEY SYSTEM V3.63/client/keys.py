@@ -13,13 +13,13 @@ except ImportError:
 
 def add_key():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("ADD NEW KEY")
     print()
     
     enter_new_key = input(f"{Fore.CYAN}┌─[{Fore.WHITE}License Key{Fore.CYAN}]\n└──➤ {Fore.WHITE}")
     
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("SELECT KEY DURATION")
     print()
     print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}1 Minute")
@@ -81,7 +81,7 @@ def remove_keys_all():
 
 def mass_key():
     client = get_client()
-    os.system("cls")
+    os.system("cls" if os.name == "nt" else "clear")
     print_banner("MASS KEY GENERATOR")
     print()
     
@@ -102,7 +102,7 @@ def mass_key():
         
         decoded = keys_data.decode("utf-8").replace("<END_OF_KEYS>", "")
         if decoded.strip():
-            os.system("cls")
+            os.system("cls" if os.name == "nt" else "clear")
             print_banner("GENERATED KEYS")
             print(f"\n{Fore.WHITE}{decoded}{Fore.RESET}")
             input(f"\n{Fore.LIGHTBLACK_EX}Press ENTER to continue...{Fore.RESET}")
@@ -115,7 +115,7 @@ def edit_key_menu(key_val=None):
         key_val = validate_input(f"\n{Fore.CYAN}Enter License Key to edit: {Fore.WHITE}")
     
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner(f"EDIT KEY: {key_val}")
         print()
         print(f"{Fore.CYAN}  [1] ➤ {Fore.WHITE}Extend Expiration")
@@ -225,7 +225,7 @@ def key_management_menu():
     search_query = ""
 
     while True:
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("KEY MANAGEMENT")
         print()
         
