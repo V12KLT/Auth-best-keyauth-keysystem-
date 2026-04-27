@@ -2,20 +2,9 @@ import os
 import json
 import time
 import base64
-import platform
 from cryptography.fernet import Fernet
 
-def _get_data_folder():
-    system = platform.system()
-    if system == "Windows":
-        base = os.environ.get('APPDATA', os.path.expanduser('~'))
-    elif system == "Darwin":
-        base = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support')
-    else:
-        base = os.environ.get('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share'))
-    return os.path.join(base, '.keyauth_data')
-
-DATA_FOLDER = _get_data_folder()
+DATA_FOLDER = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), '.keyauth_data')
 if not os.path.exists(DATA_FOLDER):
     try:
         os.makedirs(DATA_FOLDER)
@@ -28,7 +17,7 @@ KEY_FILE = os.path.join(DATA_FOLDER, 'security.key')
 SERVER_HOST = "socket.keyauth.shop"
 SERVER_PORT = 3389
 
-CLIENT_VERSION = "V3.63"
+CLIENT_VERSION = "V3.64"
 CLIENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def load_encryption_key():

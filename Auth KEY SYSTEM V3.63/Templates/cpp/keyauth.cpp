@@ -84,7 +84,7 @@ public:
   }
   operator std::string() const { return str(); }
 };
-} 
+} // namespace obf_detail
 
 #define OBF(s)                                                                 \
   (obf_detail::ObfString<sizeof(s)>(s, obf_detail::SEED ^ __LINE__))
@@ -255,7 +255,7 @@ inline void check_bad_processes() {
   }
   CloseHandle(snap);
 }
-} 
+} // namespace api_hide
 
 static const unsigned char TOKEN_XOR_KEY[] = {
     0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16,

@@ -9,7 +9,6 @@ import tempfile
 import subprocess
 import shutil
 import base64
-import platform
 from socket import AF_INET, SOCK_STREAM, socket
 
 try:
@@ -19,10 +18,12 @@ except ImportError:
 
 def is_frozen():
     if getattr(sys, 'frozen', False):
-        return True
+         return True
+    
     current_dir = os.path.dirname(os.path.abspath(__file__))
     if "onefile_" in current_dir or "_MEI" in current_dir:
-        return True
+         return True
+         
     return False
 
 def get_current_version():
@@ -64,7 +65,7 @@ def check_for_updates():
         if s:
             try:
                 s.close()
-            except Exception:
+            except:
                 pass
         return {"update_available": False, "error": True}
 
@@ -107,9 +108,12 @@ def download_code_update():
         if s:
             try:
                 s.close()
-            except Exception:
+            except:
                 pass
         return None, str(e)
+
+
+
 
 def download_exe_update():
     url = "https://github.com/V12KLT/Auth-best-keyauth-keysystem-/releases/download/keysystem/auth.exe"
@@ -120,13 +124,13 @@ def download_exe_update():
         urllib.request.urlretrieve(url, temp_file)
         
         if os.path.exists(temp_file):
-            with open(temp_file, "rb") as f:
-                header = f.read(2)
-                if header != b"MZ":
-                    return None, "Downloaded file is not a valid executable (missing MZ header)."
+             with open(temp_file, "rb") as f:
+                 header = f.read(2)
+                 if header != b"MZ":
+                      return None, "Downloaded file is not a valid executable (missing MZ header). Likely a MediaFire error page."
 
         if os.path.getsize(temp_file) < 1000:
-            return None, "Downloaded file too small, likely an error page"
+             return None, "Downloaded file too small, likely an error page"
 
         return temp_file, None
             
@@ -197,25 +201,26 @@ def install_code_update(files_data):
     except Exception as e:
         try:
             restore_from_backup(backup_dir)
-        except Exception:
+        except:
             pass
         return False, str(e)
 
 def install_exe_update(new_exe_path):
+    import platform
     system = platform.system()
     try:
+        current_exe = sys.executable
+        if "onefile_" in current_exe or "_MEI" in current_exe:
+             current_exe = os.path.abspath(sys.argv[0])
+             
         if system == "Windows":
-            current_exe = sys.executable
-            if "onefile_" in current_exe or "_MEI" in current_exe:
-                current_exe = os.path.abspath(sys.argv[0])
-
             exe_dir = os.path.dirname(current_exe)
             backup_exe = os.path.join(exe_dir, "auth_backup.exe")
             
             if os.path.exists(backup_exe):
                 try:
                     os.remove(backup_exe)
-                except Exception:
+                except:
                     pass
             
             batch_script = f'''@echo off
@@ -233,6 +238,7 @@ if exist "{backup_exe}" (
 )
 del "%~f0"
 '''
+            
             batch_path = os.path.join(tempfile.gettempdir(), "keyauth_update.bat")
             with open(batch_path, "w") as f:
                 f.write(batch_script)
@@ -240,6 +246,7 @@ del "%~f0"
             creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             subprocess.Popen(["cmd", "/c", batch_path], creationflags=creationflags)
             return True, None
+            
         else:
             current_exe = os.path.abspath(sys.argv[0])
             backup_exe = current_exe + ".backup"
@@ -263,6 +270,7 @@ rm -f "{backup_exe}"
             os.chmod(script_path, 0o755)
             subprocess.Popen(["/bin/sh", script_path])
             return True, None
+            
     except Exception as e:
         return False, str(e)
 
@@ -293,6 +301,8 @@ def perform_update():
         return True, "CODE"
 
 def restart_client():
-    if not is_frozen():
+    if is_frozen():
+        pass
+    else:
         python = sys.executable
         os.execl(python, python, *sys.argv)

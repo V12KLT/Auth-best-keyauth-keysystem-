@@ -3,8 +3,6 @@ import requests
 import hashlib
 import threading
 import time
-import platform
-import subprocess
 from socket import AF_INET, SOCK_STREAM, socket
 
 try:
@@ -15,6 +13,9 @@ except ImportError:
 client = None
 
 SERVER_CERT_FINGERPRINT = None
+
+import platform
+import subprocess
 
 def get_motherboard_serial():
     system = platform.system()

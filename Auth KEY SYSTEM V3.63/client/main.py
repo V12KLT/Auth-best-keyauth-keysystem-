@@ -17,6 +17,9 @@ try:
     from .keys import key_management_menu
     from .bans import ban_management_menu
     from .custom_tables import custom_tables_menu
+    from .files import files_menu
+    from .webhooks import webhooks_menu
+    from .app_hashes import app_hashes_menu
     from .updater import check_for_updates, perform_update
 except ImportError:
     from config import load_past_logins, get_past_login_password, delete_past_login, CLIENT_VERSION
@@ -30,6 +33,9 @@ except ImportError:
     from keys import key_management_menu
     from bans import ban_management_menu
     from custom_tables import custom_tables_menu
+    from files import files_menu
+    from webhooks import webhooks_menu
+    from app_hashes import app_hashes_menu
     from updater import check_for_updates, perform_update
 
 def check_and_update():
@@ -135,11 +141,12 @@ def main_menu():
         print(accent_color + "═" * 80)
 
         print(f"""
-        {secondary_color}[{main_color}1{secondary_color}] ➤ {Fore.WHITE}Project Settings                   {secondary_color}[{main_color}5{secondary_color}] ➤ {Fore.WHITE}IP Whitelist
-        {secondary_color}[{main_color}2{secondary_color}] ➤ {Fore.WHITE}Key Management                     {secondary_color}[{main_color}6{secondary_color}] ➤ {Fore.WHITE}Custom Tables
-        {secondary_color}[{main_color}3{secondary_color}] ➤ {Fore.WHITE}Ban Management                     {secondary_color}[{main_color}7{secondary_color}] ➤ {Fore.WHITE}Switch Project / Logout
-        {secondary_color}[{main_color}4{secondary_color}] ➤ {Fore.WHITE}Analytics & Logs                   
-        
+        {secondary_color}[{main_color}1{secondary_color}] ➤ {Fore.WHITE}Project Settings                   {secondary_color}[{main_color}6{secondary_color}] ➤ {Fore.WHITE}Custom Tables
+        {secondary_color}[{main_color}2{secondary_color}] ➤ {Fore.WHITE}Key Management                     {secondary_color}[{main_color}7{secondary_color}] ➤ {Fore.WHITE}Secure File Delivery
+        {secondary_color}[{main_color}3{secondary_color}] ➤ {Fore.WHITE}Ban Management                     {secondary_color}[{main_color}8{secondary_color}] ➤ {Fore.WHITE}Signed Webhooks
+        {secondary_color}[{main_color}4{secondary_color}] ➤ {Fore.WHITE}Analytics & Logs                   {secondary_color}[{main_color}9{secondary_color}] ➤ {Fore.WHITE}App Integrity Hashes
+        {secondary_color}[{main_color}5{secondary_color}] ➤ {Fore.WHITE}IP Whitelist                       {secondary_color}[{main_color}0{secondary_color}] ➤ {Fore.WHITE}Switch Project / Logout
+
         {secondary_color}Online: {Fore.GREEN}{online}{Fore.WHITE} | Keys: {Fore.YELLOW}{keys}{Fore.WHITE} | Used: {Fore.MAGENTA}{used}{Fore.RESET}""")
 
         print(accent_color + "═" * 80)
@@ -153,7 +160,7 @@ def main_menu():
 
         if enter == 1:
             res = project_settings_menu()
-            if res == "DELETED": return 
+            if res == "DELETED": return
         elif enter == 2:
             key_management_menu()
         elif enter == 3:
@@ -165,7 +172,13 @@ def main_menu():
         elif enter == 6:
             custom_tables_menu()
         elif enter == 7:
-            return 
+            files_menu()
+        elif enter == 8:
+            webhooks_menu()
+        elif enter == 9:
+            app_hashes_menu()
+        elif enter == 0:
+            return
 
 def start():
     check_and_update()

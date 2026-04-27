@@ -1,4 +1,4 @@
-import ssl, hashlib, sys, time, hmac, os, struct, threading, ctypes
+import ssl, hashlib, sys, time, hmac, os, struct, threading, ctypes, io
 from socket import socket, AF_INET, SOCK_STREAM
 
 _XK = bytes([0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9, 0x4F, 0xD2, 0x85, 0x33])
@@ -8,7 +8,7 @@ def _xd(data, key=_XK):
 
 _H_ENC = bytes([0xD4, 0x54, 0x91, 0x35, 0xF4, 0xB0, 0x46, 0x66, 0x86, 0x03, 0x77, 0xCC, 0x3B, 0xBA, 0xAB, 0x40, 0xCF, 0x54, 0x82])
 _CF_ENC = bytes([0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75])
-_SK_ENC = bytes([0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2])
+_SK_ENC = b""
 _P_VAL = 3389
 
 def _verify_sig(data, sig_hex):
@@ -125,7 +125,15 @@ def _adbg():
     except Exception:
         pass
 
-def authenticate(project_id, key):
+def _app_hash():
+    try:
+        path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+def authenticate(project_id, key, send_app_hash=False):
     _adbg()
     try:
         hw = _hwid()
@@ -141,12 +149,16 @@ def authenticate(project_id, key):
 
         s.send(b"2")
         time.sleep(0.2)
-        s.send(f"{project_id}|{key}|{hw}".encode())
+        auth_str = f"{project_id}|{key}|{hw}"
+        if send_app_hash:
+            auth_str += f"|{_app_hash()}"
+        s.send(auth_str.encode())
 
         r = s.recv(4096).decode()
 
         if not r.startswith("CHALLENGE|"):
             s.close()
+            print(f"Authentication failed: {r}")
             return False
 
         parts = r.split("|")
@@ -161,10 +173,12 @@ def authenticate(project_id, key):
         s.close()
 
         if not r.startswith("ACCESS|"):
+            print(f"Authentication failed: {r}")
             return False
 
         parts = r.split("|")
         if len(parts) < 4:
+            print("Authentication failed: Invalid access format")
             return False
 
         access_token = parts[1]
@@ -172,15 +186,18 @@ def authenticate(project_id, key):
         auth_sig = parts[3]
         expected = hmac.new(key.encode(), (challenge + "|" + access_token).encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(server_proof, expected):
+            print("Authentication failed: Server proof mismatch")
             return False
         if not _verify_sig(challenge + "|" + access_token, auth_sig):
+            print("Authentication failed: Server signature mismatch")
             return False
 
         raw_token = f"AUTH_TOKEN_V2|{access_token}|{hmac.new(key.encode(), access_token.encode(), hashlib.sha256).hexdigest()}"
         _ts.store(raw_token)
         return True
 
-    except Exception:
+    except Exception as e:
+        print(f"Authentication failed with exception: {e}")
         return False
 
 def _vsess(project_id, key):
@@ -286,6 +303,133 @@ def add_table_row(project_id, key, table_name, data):
         parts = r.split("|")
         return int(parts[1]) if len(parts) > 1 else True
     return None
+
+
+def download_file(project_id, key, file_name):
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        hw = _hwid()
+        host = _gh()
+        ctx = ssl.create_default_context()
+        s = ctx.wrap_socket(socket(AF_INET, SOCK_STREAM), server_hostname=host)
+        s.settimeout(30)
+        s.connect((host, _P_VAL))
+
+        if not _verify_cert_pin(s):
+            s.close()
+            return None
+
+        s.send(b"6")
+        time.sleep(0.1)
+        s.send(f"{project_id}|{key}|{hw}|{file_name}".encode())
+
+        raw = _recv_exact(s, 4)
+        if not raw:
+            s.close()
+            return None
+        hdr_len = struct.unpack(">I", raw)[0]
+        if hdr_len > 4096:
+            s.close()
+            return None
+        header_bytes = _recv_exact(s, hdr_len)
+        if not header_bytes:
+            s.close()
+            return None
+        header = header_bytes.decode("utf-8")
+
+        if header.startswith("ERROR"):
+            s.close()
+            return None
+
+        parts = header.split("|")
+        if len(parts) < 5 or parts[0] != "FILE":
+            s.close()
+            return None
+
+        nonce_hex, tag_hex, expected_hash, file_size = parts[1], parts[2], parts[3], int(parts[4])
+
+        raw2 = _recv_exact(s, 4)
+        if not raw2:
+            s.close()
+            return None
+        body_len = struct.unpack(">I", raw2)[0]
+        if body_len > 60 * 1024 * 1024:
+            s.close()
+            return None
+        body = _recv_exact(s, body_len)
+        s.close()
+        if not body:
+            return None
+
+        nonce = bytes.fromhex(nonce_hex)
+        tag = bytes.fromhex(tag_hex)
+        ciphertext = body + tag
+
+        file_key = hmac.new(key.encode(), ("FILE_KEY:" + nonce_hex).encode(), hashlib.sha256).digest()
+        aesgcm = AESGCM(file_key)
+        plaintext = aesgcm.decrypt(nonce, ciphertext, project_id.encode())
+
+        if hashlib.sha256(plaintext).hexdigest() != expected_hash:
+            return None
+        if len(plaintext) != file_size:
+            return None
+
+        return plaintext
+
+    except Exception:
+        return None
+
+
+def _recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def call_webhook(project_id, key, webhook_name, payload=None):
+    import json as _json
+    try:
+        hw = _hwid()
+        host = _gh()
+        ctx = ssl.create_default_context()
+        s = ctx.wrap_socket(socket(AF_INET, SOCK_STREAM), server_hostname=host)
+        s.settimeout(20)
+        s.connect((host, _P_VAL))
+
+        if not _verify_cert_pin(s):
+            s.close()
+            return None
+
+        s.send(b"7")
+        time.sleep(0.1)
+        payload_str = _json.dumps(payload) if payload is not None else "{}"
+        s.send(f"{project_id}|{key}|{hw}|{webhook_name}|{payload_str}".encode())
+
+        r = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            r += chunk
+            if len(r) > 1024 * 1024:
+                break
+        s.close()
+
+        r = r.decode("utf-8", errors="replace")
+        if r.startswith("ERROR"):
+            return None
+        parts = r.split("|", 2)
+        if len(parts) < 3 or parts[0] != "OK":
+            return None
+        return int(parts[1]), parts[2]
+
+    except Exception:
+        return None
+
 
 PROJECT_ID = "ENTER_PROJECT_ID_HERE"
 key = input("Enter your license key: ")
