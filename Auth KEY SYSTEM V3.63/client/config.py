@@ -2,9 +2,20 @@ import os
 import json
 import time
 import base64
+import platform
 from cryptography.fernet import Fernet
 
-DATA_FOLDER = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), '.keyauth_data')
+def _get_data_folder():
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get('APPDATA', os.path.expanduser('~'))
+    elif system == "Darwin":
+        base = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support')
+    else:
+        base = os.environ.get('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share'))
+    return os.path.join(base, '.keyauth_data')
+
+DATA_FOLDER = _get_data_folder()
 if not os.path.exists(DATA_FOLDER):
     try:
         os.makedirs(DATA_FOLDER)
