@@ -39,7 +39,7 @@ def create_account():
         return
     try:
         client = get_client()
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("CREATE NEW ACCOUNT")
         print()
         
@@ -69,7 +69,7 @@ def login_account(prefill_user=None, prefill_pass=None):
         return False
     try:
         client = get_client()
-        os.system("cls")
+        os.system("cls" if os.name == "nt" else "clear")
         print_banner("LOGIN TO YOUR ACCOUNT")
         print()
         
@@ -95,7 +95,7 @@ def login_account(prefill_user=None, prefill_pass=None):
             if len(parts) >= 2:
                 session_token = parts[1]
                 save_past_login(username, password)
-                os.system("cls")
+                os.system("cls" if os.name == "nt" else "clear")
                 print(f"\n{Fore.GREEN} Login successful!{Fore.RESET}")
                 start_heartbeat()
                 time.sleep(1)
