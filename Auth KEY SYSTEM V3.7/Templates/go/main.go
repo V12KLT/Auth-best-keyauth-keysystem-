@@ -333,7 +333,7 @@ func verifySession(key string) bool {
 	remaining := vParts[2]
 	verifyProof := vParts[3]
 	vSig := vParts[4]
-	verifyData := fmt.Sprintf("VERIFY:%s:%s", projectID, remaining)
+	verifyData = fmt.Sprintf("VERIFY:%s:%s", projectID, remaining)
 	expected := hmacSha256(key, verifyData)
 	return verifyProof == expected && verifySig(verifyData, vSig)
 }

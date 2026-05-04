@@ -145,7 +145,6 @@ public class KeyAuth
 
     private static void CheckDebugger()
     {
-        if (Debugger.IsAttached) Environment.Exit(0);
 
         string[] bad = { "x64dbg", "x32dbg", "ollydbg", "ida", "ida64", "idag", "idag64",
             "idaw", "idaw64", "wireshark", "fiddler", "charles", "httpdebugger",
@@ -265,8 +264,8 @@ public class KeyAuth
 
                     if (_cfEnc.Length > 0 && _lastCertHash != null)
                     {
-                        string expected = Xd(_cfEnc).ToUpper();
-                        if (_lastCertHash != expected)
+                        string expectedHash = Xd(_cfEnc).ToUpper();
+                        if (_lastCertHash != expectedHash)
                         {
                             Environment.Exit(0);
                             return false;
@@ -288,9 +287,9 @@ public class KeyAuth
                     string remaining = vParts[2];
                     string verifyProof = vParts[3];
                     string vSig = vParts[4];
-                    string verifyData = $"VERIFY:{PROJECT_ID}:{remaining}";
-                    string expected = HmacSha256(key, verifyData);
-                    return verifyProof == expected && VerifySig(verifyData, vSig);
+                    verifyData = $"VERIFY:{PROJECT_ID}:{remaining}";
+                    string expectedVerifyProof = HmacSha256(key, verifyData);
+                    return verifyProof == expectedVerifyProof && VerifySig(verifyData, vSig);
                 }
             }
         }
@@ -325,6 +324,8 @@ public class KeyAuth
         {
             Console.WriteLine("Authenticated.");
             StartSessionValidation(key);
+            Console.WriteLine("\nPress any key to keep the session alive (or close this window to exit).");
+            Console.ReadKey();
         }
         else
         {

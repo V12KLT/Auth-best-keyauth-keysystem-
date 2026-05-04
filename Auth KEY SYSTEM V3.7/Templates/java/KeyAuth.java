@@ -284,7 +284,7 @@ public class KeyAuth {
             String remaining = vParts[2];
             String verifyProof = vParts[3];
             String vSig = vParts[4];
-            String verifyData = "VERIFY:" + PROJECT_ID + ":" + remaining;
+            verifyData = "VERIFY:" + PROJECT_ID + ":" + remaining;
             String expected = hmacSha256(key, verifyData);
             return verifyProof.equals(expected) && verifySig(verifyData, vSig);
         } catch (Exception e) { return false; }
