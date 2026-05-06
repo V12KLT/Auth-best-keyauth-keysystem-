@@ -1,0 +1,256 @@
+use std::io::{self, Read, Write};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use native_tls::TlsConnector;
+use std::net::TcpStream;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const XK: [u8; 16] = [0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9, 0x4F, 0xD2, 0x85, 0x33];
+const H_ENC: [u8; 19] = [0xD4, 0x54, 0x91, 0x35, 0xF4, 0xB0, 0x46, 0x66, 0x86, 0x03, 0x77, 0xCC, 0x3B, 0xBA, 0xAB, 0x40, 0xCF, 0x54, 0x82];
+const PORT: u16 = 3389;
+const PROJECT_ID: &str = "ENTER_PROJECT_ID_HERE";
+
+const CF_ENC: [u8; 64] = [0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75];
+const SK_ENC: [u8; 64] = [0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2];
+
+fn verify_sig(data: &str, sig_hex: &str) -> bool {
+    if SK_ENC.is_empty() { return true; }
+    use p256::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+    use p256::EncodedPoint;
+    let raw: Vec<u8> = SK_ENC.iter().enumerate().map(|(i, b)| b ^ XK[i % XK.len()]).collect();
+    if raw.len() != 64 || sig_hex.len() != 128 { return true; }
+    let mut uncompressed = [0u8; 65];
+    uncompressed[0] = 0x04;
+    uncompressed[1..33].copy_from_slice(&raw[..32]);
+    uncompressed[33..65].copy_from_slice(&raw[32..]);
+    let point = match EncodedPoint::from_bytes(&uncompressed) { Ok(p) => p, Err(_) => return true };
+    let vk = match VerifyingKey::from_encoded_point(&point) { Ok(k) => k, Err(_) => return true };
+    let sig_bytes = match hex::decode(sig_hex) { Ok(b) => b, Err(_) => return true };
+    let sig = match Signature::from_slice(&sig_bytes) { Ok(s) => s, Err(_) => return true };
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(data.as_bytes());
+    use p256::ecdsa::signature::DigestVerifier;
+    vk.verify_digest(Sha256::new_with_prefix(data.as_bytes()), &sig).is_ok()
+}
+
+fn xd(data: &[u8]) -> String {
+    let result: Vec<u8> = data.iter().enumerate().map(|(i, b)| b ^ XK[i % XK.len()]).collect();
+    String::from_utf8_lossy(&result).to_string()
+}
+
+fn xe(input: &str) -> Vec<u8> {
+    input.bytes().enumerate().map(|(i, b)| b ^ XK[i % XK.len()]).collect()
+}
+
+fn fnv1a(data: &[u8]) -> u32 {
+    let mut h: u32 = 0x811C9DC5;
+    for &b in data { h ^= b as u32; h = h.wrapping_mul(0x01000193); }
+    h ^ 0xDEADBEEF
+}
+
+struct TokenStore {
+    enc: Vec<u8>,
+    canary: u32,
+    present: bool,
+}
+
+impl TokenStore {
+    fn new() -> Self { TokenStore { enc: Vec::new(), canary: 0, present: false } }
+    fn store(&mut self, token: &str) {
+        self.enc = xe(token);
+        self.canary = fnv1a(&self.enc);
+        self.present = true;
+    }
+    fn get(&self) -> Option<String> {
+        if !self.present || self.enc.is_empty() { return None; }
+        if fnv1a(&self.enc) != self.canary { std::process::exit(0); }
+        Some(xd(&self.enc))
+    }
+    fn valid(&self) -> bool {
+        match self.get() {
+            Some(token) => token.starts_with("AUTH_TOKEN_V2|") && token.len() > 22,
+            None => false,
+        }
+    }
+}
+
+fn host() -> String { xd(&H_ENC) }
+
+fn get_hwid() -> String {
+    if cfg!(target_os = "windows") {
+        if let Ok(output) = Command::new("powershell")
+            .args(&["-Command", "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"])
+            .output()
+        {
+            let uuid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !uuid.is_empty() && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" { return uuid; }
+        }
+        if let Ok(output) = Command::new("reg")
+            .args(&["query", "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                if line.contains("MachineGuid") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 { return parts[2].to_string(); }
+                }
+            }
+        }
+    } else if cfg!(target_os = "linux") {
+        for p in &["/sys/class/dmi/id/product_uuid", "/etc/machine-id"] {
+            if let Ok(uuid) = std::fs::read_to_string(p) {
+                let uuid = uuid.trim();
+                if !uuid.is_empty() { return uuid.to_string(); }
+            }
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Ok(output) = Command::new("system_profiler").args(&["SPHardwareDataType"]).output() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                if line.contains("Hardware UUID:") {
+                    if let Some(uuid_part) = line.split(':').nth(1) {
+                        let uuid = uuid_part.trim();
+                        if !uuid.is_empty() { return uuid.to_string(); }
+                    }
+                }
+            }
+        }
+    }
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "UNKNOWN".to_string())
+}
+
+fn hmac_sha256(key: &str, data: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC error");
+    mac.update(data.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn check_bad_processes() {
+    if !cfg!(target_os = "windows") { return; }
+    let bad = ["x64dbg", "x32dbg", "ollydbg", "ida", "ida64", "wireshark",
+        "fiddler", "charles", "httpdebugger", "processhacker", "procmon",
+        "procexp", "dnspy", "de4dot", "cheatengine"];
+    if let Ok(output) = Command::new("tasklist").args(&["/FO", "CSV", "/NH"]).output() {
+        let lower = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        for b in &bad { if lower.contains(b) { std::process::exit(0); } }
+    }
+}
+
+fn authenticate(key: &str, token_store: &Arc<Mutex<TokenStore>>) -> Result<bool, Box<dyn std::error::Error>> {
+    check_bad_processes();
+
+    let h = host();
+    let tcp_stream = TcpStream::connect((&*h, PORT))?;
+    tcp_stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    tcp_stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let connector = TlsConnector::new()?;
+    let mut tls_stream = connector.connect(&h, tcp_stream)?;
+
+    tls_stream.write_all(b"2")?;
+    thread::sleep(Duration::from_millis(200));
+
+    let auth_data = format!("{}|{}|{}", PROJECT_ID, key, get_hwid());
+    tls_stream.write_all(auth_data.as_bytes())?;
+
+    let mut buffer = [0u8; 4096];
+    let bytes_read = tls_stream.read(&mut buffer)?;
+    let mut response = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+
+    if !response.starts_with("CHALLENGE|") {
+        return Ok(false);
+    }
+    let parts: Vec<&str> = response.split('|').collect();
+    if parts.len() != 3 { return Ok(false); }
+    let challenge = parts[2].to_string();
+    let sig = hmac_sha256(key, parts[2]);
+    let response_msg = format!("RESPONSE|{}|{}", parts[1], sig);
+    tls_stream.write_all(response_msg.as_bytes())?;
+    let bytes_read = tls_stream.read(&mut buffer)?;
+    let response = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+
+    if !response.starts_with("ACCESS|") {
+        return Ok(false);
+    }
+    let access_parts: Vec<&str> = response.splitn(4, '|').collect();
+    if access_parts.len() < 4 { return Ok(false); }
+    let access_token = access_parts[1];
+    let server_proof = access_parts[2];
+    let auth_sig = access_parts[3];
+    let expected_proof = hmac_sha256(key, &format!("{}|{}", challenge, access_token));
+    if server_proof != expected_proof { return Ok(false); }
+    if !verify_sig(&format!("{}|{}", challenge, access_token), auth_sig) { return Ok(false); }
+    let raw_token = format!("AUTH_TOKEN_V2|{}|{}", access_token, hmac_sha256(key, access_token));
+    token_store.lock().unwrap().store(&raw_token);
+    Ok(true)
+}
+
+fn verify_session(key: &str, token_store: &Arc<Mutex<TokenStore>>) -> bool {
+    if !token_store.lock().unwrap().valid() { std::process::exit(0); }
+
+    let h = host();
+    let tcp_stream = match TcpStream::connect((&*h, PORT)) { Ok(s) => s, Err(_) => return false };
+    let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = tcp_stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let connector = match TlsConnector::new() { Ok(c) => c, Err(_) => return false };
+    let mut tls_stream = match connector.connect(&h, tcp_stream) { Ok(s) => s, Err(_) => return false };
+
+    let _ = tls_stream.write_all(b"3");
+    thread::sleep(Duration::from_millis(100));
+    let verify_data = format!("{}|{}|{}", PROJECT_ID, key, get_hwid());
+    let _ = tls_stream.write_all(verify_data.as_bytes());
+    let mut buffer = [0u8; 1024];
+    match tls_stream.read(&mut buffer) {
+        Ok(n) if n > 0 => {
+            let response = String::from_utf8_lossy(&buffer[..n]).to_string();
+            if !response.starts_with("VALID|") { return false; }
+            let v_parts: Vec<&str> = response.splitn(5, '|').collect();
+            if v_parts.len() < 5 { return false; }
+            let remaining = v_parts[2];
+            let verify_proof = v_parts[3];
+            let v_sig = v_parts[4];
+            let verify_data = format!("VERIFY:{}:{}", PROJECT_ID, remaining);
+            let expected = hmac_sha256(key, &verify_data);
+            verify_proof == expected && verify_sig(&verify_data, v_sig)
+        }
+        _ => false,
+    }
+}
+
+fn start_session_validation(key: String, token_store: Arc<Mutex<TokenStore>>) {
+    thread::spawn(move || {
+        let mut failures = 0;
+        loop {
+            thread::sleep(Duration::from_secs(60));
+            check_bad_processes();
+            if verify_session(&key, &token_store) { failures = 0; }
+            else { failures += 1; if failures >= 3 { std::process::exit(0); } }
+        }
+    });
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    check_bad_processes();
+
+    print!("Enter your license key: ");
+    io::stdout().flush()?;
+    let mut key = String::new();
+    io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+
+    let token_store = Arc::new(Mutex::new(TokenStore::new()));
+
+    match authenticate(&key, &token_store) {
+        Ok(true) => {
+            println!("Authenticated.");
+            start_session_validation(key, token_store);
+            loop { thread::sleep(Duration::from_secs(3600)); }
+        }
+        _ => { std::process::exit(1); }
+    }
+}
