@@ -32,6 +32,10 @@
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
+
+#include <shellapi.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -893,6 +897,162 @@ inline void StartSessionValidationThread(const std::string &key) {
       }
     }
   }).detach();
+}
+
+inline std::vector<unsigned char> recvExact(MiniSsl &ssl, int n) {
+  std::vector<unsigned char> buf;
+  buf.reserve(n);
+  while ((int)buf.size() < n) {
+    char tmp[4096];
+    int toRead = (std::min)(n - (int)buf.size(), (int)sizeof(tmp));
+    int r = ssl.Read(tmp, toRead);
+    if (r <= 0) return {};
+    buf.insert(buf.end(), tmp, tmp + r);
+  }
+  return buf;
+}
+
+inline std::vector<unsigned char> downloadFile(const std::string &key, const std::string &fileName) {
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return {};
+  struct addrinfo hints = {0}, *result = NULL;
+  hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_protocol = IPPROTO_TCP;
+  std::string srvHost = get_server_host();
+  if (getaddrinfo(srvHost.c_str(), std::to_string(get_server_port()).c_str(), &hints, &result) != 0) { WSACleanup(); return {}; }
+  SOCKET sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+  if (sockfd == INVALID_SOCKET) { freeaddrinfo(result); WSACleanup(); return {}; }
+  DWORD timeout = 30000;
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+  if (connect(sockfd, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) { closesocket(sockfd); freeaddrinfo(result); WSACleanup(); return {}; }
+  freeaddrinfo(result);
+  MiniSsl ssl(sockfd);
+  if (!ssl.Connect(srvHost)) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (!verifyCertPin(ssl.getCtx())) { closesocket(sockfd); WSACleanup(); return {}; }
+
+  ssl.Write("6", 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  std::string reqData = get_project_id() + "|" + key + "|" + getHWID() + "|" + fileName;
+  ssl.Write(reqData.c_str(), (int)reqData.length());
+
+  auto hdrLenRaw = recvExact(ssl, 4);
+  if (hdrLenRaw.size() != 4) { closesocket(sockfd); WSACleanup(); return {}; }
+  uint32_t hdrLen = ((uint32_t)hdrLenRaw[0] << 24) | ((uint32_t)hdrLenRaw[1] << 16) | ((uint32_t)hdrLenRaw[2] << 8) | hdrLenRaw[3];
+  if (hdrLen > 4096) { closesocket(sockfd); WSACleanup(); return {}; }
+  auto hdrBytes = recvExact(ssl, hdrLen);
+  if (hdrBytes.size() != hdrLen) { closesocket(sockfd); WSACleanup(); return {}; }
+  std::string header(hdrBytes.begin(), hdrBytes.end());
+  if (header.find("ERROR") == 0) { closesocket(sockfd); WSACleanup(); return {}; }
+
+  std::vector<std::string> parts;
+  { std::istringstream iss(header); std::string part; while (std::getline(iss, part, '|')) parts.push_back(part); }
+  if (parts.size() < 5 || parts[0] != "FILE") { closesocket(sockfd); WSACleanup(); return {}; }
+  std::string nonceHex = parts[1], tagHex = parts[2], expectedHash = parts[3];
+  int fileSize = std::stoi(parts[4]);
+
+  auto bodyLenRaw = recvExact(ssl, 4);
+  if (bodyLenRaw.size() != 4) { closesocket(sockfd); WSACleanup(); return {}; }
+  uint32_t bodyLen = ((uint32_t)bodyLenRaw[0] << 24) | ((uint32_t)bodyLenRaw[1] << 16) | ((uint32_t)bodyLenRaw[2] << 8) | bodyLenRaw[3];
+  if (bodyLen > 60 * 1024 * 1024) { closesocket(sockfd); WSACleanup(); return {}; }
+  auto body = recvExact(ssl, bodyLen);
+  closesocket(sockfd); WSACleanup();
+  if (body.size() != bodyLen) return {};
+
+  auto hexDecode = [](const std::string &h) -> std::vector<unsigned char> {
+    std::vector<unsigned char> out;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) {
+      auto hv = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? 10+c-'a' : c >= 'A' && c <= 'F' ? 10+c-'A' : -1; };
+      int v1 = hv(h[i]), v2 = hv(h[i+1]); if (v1 < 0 || v2 < 0) return {};
+      out.push_back((unsigned char)(v1*16+v2));
+    }
+    return out;
+  };
+
+  auto nonce = hexDecode(nonceHex);
+  auto tag = hexDecode(tagHex);
+  if (nonce.size() != 12 || tag.size() != 16) return {};
+
+  std::string fileKeyData = "FILE_KEY:" + nonceHex;
+  std::string fileKeyHex = hmacSha256(key, fileKeyData);
+  auto fileKey = hexDecode(fileKeyHex);
+  if (fileKey.size() != 32) return {};
+
+  BCRYPT_ALG_HANDLE hAlg = NULL; BCRYPT_KEY_HANDLE hKey = NULL;
+  if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0))) return {};
+  if (!NT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) { BCryptCloseAlgorithmProvider(hAlg, 0); return {}; }
+  if (!NT_SUCCESS(BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, fileKey.data(), (ULONG)fileKey.size(), 0))) { BCryptCloseAlgorithmProvider(hAlg, 0); return {}; }
+
+  BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+  BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+  authInfo.pbNonce = nonce.data(); authInfo.cbNonce = (ULONG)nonce.size();
+  authInfo.pbTag = tag.data(); authInfo.cbTag = (ULONG)tag.size();
+  std::string aadStr = get_project_id();
+  authInfo.pbAuthData = (PBYTE)aadStr.c_str(); authInfo.cbAuthData = (ULONG)aadStr.size();
+
+  DWORD cbResult = 0;
+  std::vector<unsigned char> plaintext(body.size());
+  NTSTATUS status = BCryptDecrypt(hKey, body.data(), (ULONG)body.size(), &authInfo, NULL, 0, plaintext.data(), (ULONG)plaintext.size(), &cbResult, 0);
+  BCryptDestroyKey(hKey); BCryptCloseAlgorithmProvider(hAlg, 0);
+  if (!NT_SUCCESS(status)) return {};
+  plaintext.resize(cbResult);
+
+  std::string actualHash = sha256(std::string(plaintext.begin(), plaintext.end()));
+  if (actualHash != expectedHash || (int)plaintext.size() != fileSize) return {};
+  return plaintext;
+}
+
+inline void secureWipeFile(const std::wstring &path) {
+  HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile != INVALID_HANDLE_VALUE) {
+    LARGE_INTEGER fileSize; GetFileSizeEx(hFile, &fileSize);
+    std::vector<BYTE> zeros((size_t)fileSize.QuadPart, 0);
+    DWORD written; WriteFile(hFile, zeros.data(), (DWORD)zeros.size(), &written, NULL);
+    FlushFileBuffers(hFile); CloseHandle(hFile);
+  }
+  DeleteFileW(path.c_str());
+}
+
+inline bool downloadAndRun(const std::string &key, const std::string &fileName) {
+  auto data = downloadFile(key, fileName);
+  if (data.empty()) return false;
+
+  wchar_t tempPath[MAX_PATH];
+  GetTempPathW(MAX_PATH, tempPath);
+  GUID guid; CoCreateGuid(&guid);
+  wchar_t guidStr[64]; swprintf_s(guidStr, L"_ka_%08x", guid.Data1);
+  std::wstring randomDir = std::wstring(tempPath) + guidStr;
+  CreateDirectoryW(randomDir.c_str(), NULL);
+  SetFileAttributesW(randomDir.c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+
+  std::wstring wFileName(fileName.begin(), fileName.end());
+  std::wstring exePath = randomDir + L"\\" + wFileName;
+
+  HANDLE hFile = CreateFileW(exePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY, NULL);
+  if (hFile == INVALID_HANDLE_VALUE) return false;
+  DWORD written; WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL);
+  FlushFileBuffers(hFile); CloseHandle(hFile);
+
+  SecureZeroMemory(data.data(), data.size());
+  data.clear();
+
+  SHELLEXECUTEINFOW sei = {};
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+  sei.lpVerb = L"runas";
+  sei.lpFile = exePath.c_str();
+  sei.lpDirectory = randomDir.c_str();
+  sei.nShow = SW_SHOW;
+  if (!ShellExecuteExW(&sei)) return false;
+  if (sei.hProcess) CloseHandle(sei.hProcess);
+
+  std::wstring capExe = exePath, capDir = randomDir;
+  std::thread([capExe, capDir]() {
+    Sleep(2000);
+    secureWipeFile(capExe);
+    Sleep(1000);
+    RemoveDirectoryW(capDir.c_str());
+  }).detach();
+
+  return true;
 }
 
 #ifndef KEYAUTH_HEADER_ONLY

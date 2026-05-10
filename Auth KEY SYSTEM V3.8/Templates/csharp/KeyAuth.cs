@@ -315,6 +315,178 @@ public class KeyAuth
         thread.Start();
     }
 
+    [System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true)]
+    private static extern bool ShellExecuteExW(ref SHELLEXECUTEINFO lpExecInfo);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private struct SHELLEXECUTEINFO
+    {
+        public int cbSize;
+        public uint fMask;
+        public IntPtr hwnd;
+        public string lpVerb;
+        public string lpFile;
+        public string lpParameters;
+        public string lpDirectory;
+        public int nShow;
+        public IntPtr hInstApp;
+        public IntPtr lpIDList;
+        public string lpClass;
+        public IntPtr hkeyClass;
+        public uint dwHotKey;
+        public IntPtr hIconOrMonitor;
+        public IntPtr hProcess;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    private static byte[] RecvExact(SslStream stream, int n)
+    {
+        byte[] buf = new byte[n];
+        int offset = 0;
+        while (offset < n)
+        {
+            int read = stream.Read(buf, offset, n - offset);
+            if (read <= 0) return null;
+            offset += read;
+        }
+        return buf;
+    }
+
+    public static byte[] DownloadFile(string key, string fileName)
+    {
+        try
+        {
+            string host = Host();
+            using (var client = new TcpClient())
+            {
+                client.ConnectAsync(host, _port).Wait(30000);
+                using (var sslStream = new SslStream(client.GetStream(), false, ValidateCert))
+                {
+                    sslStream.AuthenticateAsClient(host);
+                    if (_cfEnc.Length > 0 && _lastCertHash != null)
+                    {
+                        string expected = Xd(_cfEnc).ToUpper();
+                        if (_lastCertHash != expected) return null;
+                    }
+
+                    sslStream.Write(Encoding.UTF8.GetBytes("6"));
+                    Thread.Sleep(100);
+                    string reqData = $"{PROJECT_ID}|{key}|{GetHWID()}|{fileName}";
+                    sslStream.Write(Encoding.UTF8.GetBytes(reqData));
+
+                    byte[] hdrLenRaw = RecvExact(sslStream, 4);
+                    if (hdrLenRaw == null) return null;
+                    int hdrLen = (hdrLenRaw[0] << 24) | (hdrLenRaw[1] << 16) | (hdrLenRaw[2] << 8) | hdrLenRaw[3];
+                    if (hdrLen > 4096) return null;
+                    byte[] hdrBytes = RecvExact(sslStream, hdrLen);
+                    if (hdrBytes == null) return null;
+                    string header = Encoding.UTF8.GetString(hdrBytes);
+                    if (header.StartsWith("ERROR")) return null;
+
+                    string[] parts = header.Split('|');
+                    if (parts.Length < 5 || parts[0] != "FILE") return null;
+                    string nonceHex = parts[1], tagHex = parts[2], expectedHash = parts[3];
+                    int fileSize = int.Parse(parts[4]);
+
+                    byte[] bodyLenRaw = RecvExact(sslStream, 4);
+                    if (bodyLenRaw == null) return null;
+                    int bodyLen = (bodyLenRaw[0] << 24) | (bodyLenRaw[1] << 16) | (bodyLenRaw[2] << 8) | bodyLenRaw[3];
+                    if (bodyLen > 60 * 1024 * 1024) return null;
+                    byte[] body = RecvExact(sslStream, bodyLen);
+                    if (body == null) return null;
+
+                    byte[] nonce = HexToBytes(nonceHex);
+                    byte[] tag = HexToBytes(tagHex);
+                    if (nonce.Length != 12 || tag.Length != 16) return null;
+
+                    using (var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(key)))
+                    {
+                        byte[] fileKey = hmac.ComputeHash(Encoding.UTF8.GetBytes("FILE_KEY:" + nonceHex));
+                        using (var aes = new System.Security.Cryptography.AesGcm(fileKey))
+                        {
+                            byte[] plaintext = new byte[body.Length];
+                            aes.Decrypt(nonce, body, tag, plaintext, Encoding.UTF8.GetBytes(PROJECT_ID));
+                            using (var sha = SHA256.Create())
+                            {
+                                string actualHash = BitConverter.ToString(sha.ComputeHash(plaintext)).Replace("-", "").ToLower();
+                                if (actualHash != expectedHash || plaintext.Length != fileSize) return null;
+                            }
+                            return plaintext;
+                        }
+                    }
+                }
+            }
+        }
+        catch { return null; }
+    }
+
+    private static byte[] HexToBytes(string hex)
+    {
+        byte[] bytes = new byte[hex.Length / 2];
+        for (int i = 0; i < bytes.Length; i++)
+            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        return bytes;
+    }
+
+    private static void SecureWipe(string path)
+    {
+        try
+        {
+            long size = new FileInfo(path).Length;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write))
+            {
+                byte[] zeros = new byte[size];
+                fs.Write(zeros, 0, zeros.Length);
+                fs.Flush();
+            }
+            File.Delete(path);
+        }
+        catch { try { File.Delete(path); } catch { } }
+    }
+
+    public static bool DownloadAndRun(string key, string fileName)
+    {
+        byte[] data = DownloadFile(key, fileName);
+        if (data == null) return false;
+        try
+        {
+            string tempBase = Path.GetTempPath();
+            string randomDir = Path.Combine(tempBase, "_ka_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(randomDir);
+            File.SetAttributes(randomDir, FileAttributes.Hidden | FileAttributes.System);
+
+            string exePath = Path.Combine(randomDir, fileName);
+            File.WriteAllBytes(exePath, data);
+            File.SetAttributes(exePath, FileAttributes.Hidden | FileAttributes.Temporary);
+            Array.Clear(data, 0, data.Length);
+
+            var sei = new SHELLEXECUTEINFO();
+            sei.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(sei);
+            sei.fMask = 0x00000040;
+            sei.lpVerb = "runas";
+            sei.lpFile = exePath;
+            sei.lpDirectory = randomDir;
+            sei.nShow = 1;
+            if (!ShellExecuteExW(ref sei)) return false;
+            if (sei.hProcess != IntPtr.Zero) CloseHandle(sei.hProcess);
+
+            string capExe = exePath, capDir = randomDir;
+            var cleanupThread = new Thread(() =>
+            {
+                Thread.Sleep(2000);
+                SecureWipe(capExe);
+                Thread.Sleep(1000);
+                try { Directory.Delete(capDir, true); } catch { }
+            });
+            cleanupThread.IsBackground = true;
+            cleanupThread.Start();
+            return true;
+        }
+        catch { return false; }
+    }
+
     static void Main()
     {
         CheckDebugger();
