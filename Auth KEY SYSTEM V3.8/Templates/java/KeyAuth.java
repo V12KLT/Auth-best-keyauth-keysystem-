@@ -19,7 +19,7 @@ public class KeyAuth {
     private static final String PROJECT_ID = "ENTER_PROJECT_ID_HERE";
 
     private static final byte[] CF_ENC = {(byte)0x94, 0x7E, (byte)0xB1, 0x6A, (byte)0xD4, (byte)0xF0, 0x5A, 0x3D, (byte)0xDA, 0x3C, 0x55, (byte)0xFA, 0x77, (byte)0x97, (byte)0xB2, 0x71, (byte)0xE5, 0x0F, (byte)0xC4, 0x68, (byte)0xD3, (byte)0x80, 0x29, 0x3F, (byte)0xA0, 0x39, 0x23, (byte)0x89, 0x0A, (byte)0xE7, (byte)0xC0, 0x72, (byte)0xE2, 0x0F, (byte)0xC4, 0x68, (byte)0xA7, (byte)0x87, 0x2C, 0x3F, (byte)0xA7, 0x3E, 0x57, (byte)0x88, 0x09, (byte)0xE3, (byte)0xC6, 0x70, (byte)0x95, 0x0F, (byte)0xB6, 0x6D, (byte)0xD5, (byte)0xF3, 0x2D, 0x39, (byte)0xD2, 0x4B, 0x25, (byte)0x8C, 0x09, (byte)0xEA, (byte)0xB3, 0x75};
-    private static final byte[] SK_ENC = new byte[] {(byte)0xB8, (byte)0xBF, (byte)0xD5, 0x63, 0x73, (byte)0xEC, (byte)0x9C, 0x4B, (byte)0x82, (byte)0x8D, (byte)0xAF, (byte)0x84, 0x32, 0x17, 0x3D, 0x78, (byte)0xF8, (byte)0xCC, 0x41, (byte)0xCB, (byte)0x8A, 0x5D, 0x3B, (byte)0xCD, (byte)0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, (byte)0xB5, 0x7C, (byte)0x8D, (byte)0xEE, 0x21, 0x14, 0x56, 0x70, (byte)0x9F, (byte)0xA3, 0x6D, 0x4D, 0x6F, 0x4B, (byte)0xE8, 0x02, (byte)0xC5, 0x6E, (byte)0xE5, 0x7F, 0x33, (byte)0xBC, 0x21, (byte)0x8C, 0x7E, (byte)0xF4, (byte)0xAB, 0x7B, 0x56, 0x1C, (byte)0xA2};
+    private static byte[] cachedPubKey = null;
 
     private static boolean verifyCertPin(SSLSocket socket) {
         if (CF_ENC.length == 0) return true;
@@ -94,7 +94,7 @@ public class KeyAuth {
                 BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
                 String uuid = reader.readLine();
                 if (uuid != null && !uuid.trim().isEmpty() && !uuid.equals("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"))
-                    return uuid.trim();
+                    return sha256Hex(uuid.trim());
             } else if (os.contains("linux")) {
                 for (String path : new String[]{"/sys/class/dmi/id/product_uuid", "/etc/machine-id"}) {
                     File f = new File(path);
@@ -102,7 +102,7 @@ public class KeyAuth {
                         BufferedReader reader = new BufferedReader(new FileReader(f));
                         String uuid = reader.readLine();
                         reader.close();
-                        if (uuid != null && !uuid.trim().isEmpty()) return uuid.trim();
+                        if (uuid != null && !uuid.trim().isEmpty()) return sha256Hex(uuid.trim());
                     }
                 }
             } else if (os.contains("mac")) {
@@ -112,14 +112,24 @@ public class KeyAuth {
                 while ((line = reader.readLine()) != null) {
                     if (line.contains("Hardware UUID:")) {
                         String[] parts = line.split(":");
-                        if (parts.length >= 2) return parts[1].trim();
+                        if (parts.length >= 2) return sha256Hex(parts[1].trim());
                     }
                 }
             }
         } catch (Exception e) { }
         String hostname = System.getenv("COMPUTERNAME");
         if (hostname == null) hostname = System.getenv("HOSTNAME");
-        return hostname != null ? hostname : "UNKNOWN";
+        return sha256Hex(hostname != null ? hostname : "UNKNOWN");
+    }
+
+    private static String sha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format("%02x", b & 0xFF));
+            return sb.toString();
+        } catch (Exception e) { throw new RuntimeException(e); }
     }
 
     private static String hmacSha256(String key, String data) {
@@ -133,11 +143,40 @@ public class KeyAuth {
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
-    private static boolean verifySig(String data, String sigHex) {
-        if (SK_ENC.length == 0) return true;
+    private static byte[] fetchPubKey() {
+        if (cachedPubKey != null) return cachedPubKey;
         try {
-            byte[] raw = new byte[SK_ENC.length];
-            for (int i = 0; i < raw.length; i++) raw[i] = (byte)(SK_ENC[i] ^ XK[i % XK.length]);
+            String h = host();
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, null, null);
+            SSLSocket sock = (SSLSocket) ctx.getSocketFactory().createSocket(h, PORT);
+            sock.setSoTimeout(10000);
+            sock.startHandshake();
+            OutputStream out = sock.getOutputStream();
+            InputStream in = sock.getInputStream();
+            out.write("8".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            byte[] buf = new byte[4096];
+            int n = in.read(buf);
+            sock.close();
+            if (n > 0) {
+                String resp = new String(buf, 0, n, StandardCharsets.UTF_8);
+                if (resp.startsWith("PUBKEY|")) {
+                    String hex = resp.substring(7);
+                    byte[] raw = new byte[hex.length() / 2];
+                    for (int i = 0; i < raw.length; i++)
+                        raw[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+                    if (raw.length == 64) { cachedPubKey = raw; return raw; }
+                }
+            }
+        } catch (Exception e) { }
+        return null;
+    }
+
+    private static boolean verifySig(String data, String sigHex) {
+        byte[] raw = fetchPubKey();
+        if (raw == null) return true;
+        try {
             BigInteger x = new BigInteger(1, java.util.Arrays.copyOfRange(raw, 0, 32));
             BigInteger y = new BigInteger(1, java.util.Arrays.copyOfRange(raw, 32, 64));
             ECPublicKeySpec spec = new ECPublicKeySpec(new ECPoint(x, y), getP256Params());

@@ -16,13 +16,45 @@ const PORT: u16 = 3389;
 const PROJECT_ID: &str = "ENTER_PROJECT_ID_HERE";
 
 const CF_ENC: [u8; 64] = [0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75];
-const SK_ENC: [u8; 64] = [0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2];
+
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+static CACHED_PUBKEY: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
+
+fn fetch_pubkey() -> Option<Vec<u8>> {
+    if let Ok(guard) = CACHED_PUBKEY.lock() {
+        if let Some(ref key) = *guard {
+            return Some(key.clone());
+        }
+    }
+    let h = host();
+    let tcp = TcpStream::connect((&*h, PORT)).ok()?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).ok()?;
+    let connector = TlsConnector::new().ok()?;
+    let mut tls = connector.connect(&h, tcp).ok()?;
+    tls.write_all(b"8").ok()?;
+    let mut buf = [0u8; 4096];
+    let n = tls.read(&mut buf).ok()?;
+    let resp = String::from_utf8_lossy(&buf[..n]).to_string();
+    if resp.starts_with("PUBKEY|") {
+        let raw = hex::decode(&resp[7..]).ok()?;
+        if raw.len() == 64 {
+            if let Ok(mut guard) = CACHED_PUBKEY.lock() {
+                *guard = Some(raw.clone());
+            }
+            return Some(raw);
+        }
+    }
+    None
+}
 
 fn verify_sig(data: &str, sig_hex: &str) -> bool {
-    if SK_ENC.is_empty() { return true; }
+    let raw = match fetch_pubkey() {
+        Some(r) => r,
+        None => return true,
+    };
     use p256::ecdsa::{VerifyingKey, Signature, signature::Verifier};
     use p256::EncodedPoint;
-    let raw: Vec<u8> = SK_ENC.iter().enumerate().map(|(i, b)| b ^ XK[i % XK.len()]).collect();
     if raw.len() != 64 || sig_hex.len() != 128 { return true; }
     let mut uncompressed = [0u8; 65];
     uncompressed[0] = 0x04;
@@ -32,10 +64,8 @@ fn verify_sig(data: &str, sig_hex: &str) -> bool {
     let vk = match VerifyingKey::from_encoded_point(&point) { Ok(k) => k, Err(_) => return true };
     let sig_bytes = match hex::decode(sig_hex) { Ok(b) => b, Err(_) => return true };
     let sig = match Signature::from_slice(&sig_bytes) { Ok(s) => s, Err(_) => return true };
-    use sha2::{Sha256, Digest};
-    let hash = Sha256::digest(data.as_bytes());
     use p256::ecdsa::signature::DigestVerifier;
-    vk.verify_digest(Sha256::new_with_prefix(data.as_bytes()), &sig).is_ok()
+    vk.verify_digest(sha2::Sha256::new_with_prefix(data.as_bytes()), &sig).is_ok()
 }
 
 fn xd(data: &[u8]) -> String {
@@ -82,47 +112,57 @@ impl TokenStore {
 fn host() -> String { xd(&H_ENC) }
 
 fn get_hwid() -> String {
-    if cfg!(target_os = "windows") {
+    use sha2::Digest;
+    let raw = if cfg!(target_os = "windows") {
         if let Ok(output) = Command::new("powershell")
             .args(&["-Command", "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"])
             .output()
         {
             let uuid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !uuid.is_empty() && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" { return uuid; }
-        }
-        if let Ok(output) = Command::new("reg")
-            .args(&["query", "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"])
-            .output()
-        {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            for line in output_str.lines() {
-                if line.contains("MachineGuid") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 { return parts[2].to_string(); }
-                }
+            if !uuid.is_empty() && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" {
+                uuid
+            } else if let Ok(output) = Command::new("reg")
+                .args(&["query", "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"])
+                .output()
+            {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                output_str.lines()
+                    .find(|l| l.contains("MachineGuid"))
+                    .and_then(|l| l.split_whitespace().nth(2))
+                    .unwrap_or("UNKNOWN")
+                    .to_string()
+            } else {
+                std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN".to_string())
             }
+        } else {
+            std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN".to_string())
         }
     } else if cfg!(target_os = "linux") {
+        let mut found = None;
         for p in &["/sys/class/dmi/id/product_uuid", "/etc/machine-id"] {
             if let Ok(uuid) = std::fs::read_to_string(p) {
-                let uuid = uuid.trim();
-                if !uuid.is_empty() { return uuid.to_string(); }
+                let uuid = uuid.trim().to_string();
+                if !uuid.is_empty() { found = Some(uuid); break; }
             }
         }
+        found.unwrap_or_else(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "UNKNOWN".to_string()))
     } else if cfg!(target_os = "macos") {
         if let Ok(output) = Command::new("system_profiler").args(&["SPHardwareDataType"]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            for line in output_str.lines() {
-                if line.contains("Hardware UUID:") {
-                    if let Some(uuid_part) = line.split(':').nth(1) {
-                        let uuid = uuid_part.trim();
-                        if !uuid.is_empty() { return uuid.to_string(); }
-                    }
-                }
-            }
+            output_str.lines()
+                .find(|l| l.contains("Hardware UUID:"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "UNKNOWN".to_string())
+        } else {
+            "UNKNOWN".to_string()
         }
-    }
-    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "UNKNOWN".to_string())
+    } else {
+        std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "UNKNOWN".to_string())
+    };
+    let hash = sha2::Sha256::digest(raw.as_bytes());
+    hex::encode(hash)
 }
 
 fn hmac_sha256(key: &str, data: &str) -> String {

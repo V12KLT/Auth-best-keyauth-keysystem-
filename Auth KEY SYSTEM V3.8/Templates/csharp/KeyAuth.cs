@@ -18,7 +18,7 @@ public class KeyAuth
     private const string PROJECT_ID = "ENTER_PROJECT_ID_HERE";
 
     private static readonly byte[] _cfEnc = new byte[] { 0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75 };
-    private static readonly byte[] _skEnc = new byte[] { 0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2 };
+    private static byte[] _cachedPubKey = null;
     private static string _lastCertHash = null;
 
     private static byte[] _encToken = null;
@@ -81,6 +81,7 @@ public class KeyAuth
 
     public static string GetHWID()
     {
+        string raw;
         try
         {
             using (var searcher = new ManagementObjectSearcher("SELECT UUID FROM Win32_ComputerSystemProduct"))
@@ -89,12 +90,24 @@ public class KeyAuth
                 {
                     string uuid = obj["UUID"]?.ToString();
                     if (!string.IsNullOrEmpty(uuid) && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")
-                        return uuid;
+                    {
+                        raw = uuid;
+                        using (var sha = SHA256.Create())
+                        {
+                            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
+                            return BitConverter.ToString(hash).Replace("-", "").ToLower();
+                        }
+                    }
                 }
             }
         }
         catch { }
-        return Environment.MachineName ?? "UNKNOWN";
+        raw = Environment.MachineName ?? "UNKNOWN";
+        using (var sha = SHA256.Create())
+        {
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(raw));
+            return BitConverter.ToString(hash).Replace("-", "").ToLower();
+        }
     }
 
     public static string HmacSha256(string key, string data)
@@ -105,13 +118,46 @@ public class KeyAuth
         }
     }
 
-    private static bool VerifySig(string data, string sigHex)
+    private static byte[] FetchPubKey()
     {
-        if (_skEnc.Length == 0) return true;
+        if (_cachedPubKey != null) return _cachedPubKey;
         try
         {
-            byte[] raw = new byte[_skEnc.Length];
-            for (int i = 0; i < raw.Length; i++) raw[i] = (byte)(_skEnc[i] ^ _xk[i % _xk.Length]);
+            string h = Host();
+            using (var tcp = new TcpClient(h, _port))
+            using (var ssl = new SslStream(tcp.GetStream(), false, (s, c, ch, e) => true))
+            {
+                ssl.AuthenticateAsClient(h);
+                byte[] cmd = Encoding.UTF8.GetBytes("8");
+                ssl.Write(cmd, 0, cmd.Length);
+                ssl.Flush();
+                byte[] buf = new byte[4096];
+                int n = ssl.Read(buf, 0, buf.Length);
+                string resp = Encoding.UTF8.GetString(buf, 0, n);
+                if (resp.StartsWith("PUBKEY|"))
+                {
+                    string hex = resp.Substring(7);
+                    byte[] raw = new byte[hex.Length / 2];
+                    for (int i = 0; i < raw.Length; i++)
+                        raw[i] = (byte)(HexVal(hex[i * 2]) * 16 + HexVal(hex[i * 2 + 1]));
+                    if (raw.Length == 64)
+                    {
+                        _cachedPubKey = raw;
+                        return raw;
+                    }
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static bool VerifySig(string data, string sigHex)
+    {
+        byte[] raw = FetchPubKey();
+        if (raw == null) return true;
+        try
+        {
             byte[] x = new byte[32], y = new byte[32];
             Array.Copy(raw, 0, x, 0, 32);
             Array.Copy(raw, 32, y, 0, 32);
@@ -170,63 +216,85 @@ public class KeyAuth
         try
         {
             string host = Host();
+            Console.WriteLine($"[DEBUG] Connecting to {host}:{_port}...");
             using (var client = new TcpClient())
             {
-                client.ConnectAsync(host, _port).Wait(15000);
+                if (!client.ConnectAsync(host, _port).Wait(15000))
+                {
+                    Console.WriteLine("[DEBUG] Connection timed out");
+                    return false;
+                }
+                Console.WriteLine("[DEBUG] Connected, starting TLS...");
                 using (var sslStream = new SslStream(client.GetStream(), false, ValidateCert))
                 {
                     sslStream.AuthenticateAsClient(host);
+                    Console.WriteLine($"[DEBUG] TLS established, cert hash: {_lastCertHash}");
 
                     if (_cfEnc.Length > 0 && _lastCertHash != null)
                     {
                         string expected = Xd(_cfEnc).ToUpper();
                         if (_lastCertHash != expected)
+                        {
+                            Console.WriteLine($"[DEBUG] Cert pin FAILED: expected={expected}, got={_lastCertHash}");
                             return false;
+                        }
+                        Console.WriteLine("[DEBUG] Cert pin OK");
                     }
 
                     byte[] handshake = Encoding.UTF8.GetBytes("2");
                     sslStream.Write(handshake, 0, handshake.Length);
                     Thread.Sleep(200);
 
-                    string authData = $"{PROJECT_ID}|{key}|{GetHWID()}";
+                    string hwid = GetHWID();
+                    Console.WriteLine($"[DEBUG] HWID: {hwid}");
+                    string authData = $"{PROJECT_ID}|{key}|{hwid}";
                     byte[] data = Encoding.UTF8.GetBytes(authData);
                     sslStream.Write(data, 0, data.Length);
 
                     byte[] buffer = new byte[4096];
                     int bytesRead = sslStream.Read(buffer, 0, buffer.Length);
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"[DEBUG] Server response: {response}");
 
                     if (!response.StartsWith("CHALLENGE|"))
+                    {
+                        Console.WriteLine($"[DEBUG] Expected CHALLENGE, got: {response}");
                         return false;
+                    }
 
                     string[] parts = response.Split('|');
-                    if (parts.Length != 3) return false;
+                    if (parts.Length != 3) { Console.WriteLine($"[DEBUG] Bad challenge parts: {parts.Length}"); return false; }
                     string challenge = parts[2];
                     string sig = HmacSha256(key, parts[2]);
                     byte[] respBytes = Encoding.UTF8.GetBytes($"RESPONSE|{parts[1]}|{sig}");
                     sslStream.Write(respBytes, 0, respBytes.Length);
                     bytesRead = sslStream.Read(buffer, 0, buffer.Length);
                     response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"[DEBUG] Final response: {response}");
 
                     if (!response.StartsWith("ACCESS|"))
+                    {
+                        Console.WriteLine($"[DEBUG] Expected ACCESS, got: {response}");
                         return false;
+                    }
 
                     string[] accessParts = response.Split('|');
-                    if (accessParts.Length < 4) return false;
+                    if (accessParts.Length < 4) { Console.WriteLine("[DEBUG] Bad access parts"); return false; }
                     string accessToken = accessParts[1];
                     string serverProof = accessParts[2];
                     string authSig = accessParts[3];
                     string expectedProof = HmacSha256(key, challenge + "|" + accessToken);
-                    if (serverProof != expectedProof) return false;
-                    if (!VerifySig(challenge + "|" + accessToken, authSig)) return false;
+                    if (serverProof != expectedProof) { Console.WriteLine("[DEBUG] Server proof mismatch"); return false; }
+                    if (!VerifySig(challenge + "|" + accessToken, authSig)) { Console.WriteLine("[DEBUG] Sig verify failed"); return false; }
 
                     string rawToken = $"AUTH_TOKEN_V2|{accessToken}|{HmacSha256(key, accessToken)}";
                     StoreToken(rawToken);
+                    Console.WriteLine("[DEBUG] Auth success!");
                     return true;
                 }
             }
         }
-        catch { return false; }
+        catch (Exception ex) { Console.WriteLine($"[DEBUG] Exception: {ex}"); return false; }
     }
 
     private static bool ValidateCert(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors)
@@ -501,6 +569,9 @@ public class KeyAuth
         }
         else
         {
+            Console.WriteLine("failed");
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
             Environment.Exit(1);
         }
     }

@@ -9,13 +9,53 @@ const _port = 3389;
 const PROJECT_ID = 'ENTER_PROJECT_ID_HERE';
 
 const _cfEnc = Buffer.from([0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75]);
-const _skEnc = Buffer.from([0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2]);
+let _cachedPubKey = null;
+
+function _fetchPubKey() {
+    if (_cachedPubKey) return _cachedPubKey;
+    return new Promise((resolve) => {
+        const h = _xd(_hEnc);
+        const socket = tls.connect(_port, h, { servername: h }, () => {
+            socket.write('8');
+        });
+        let data = '';
+        socket.on('data', (chunk) => { data += chunk.toString(); });
+        socket.on('end', () => {
+            if (data.startsWith('PUBKEY|')) {
+                const raw = Buffer.from(data.slice(7), 'hex');
+                if (raw.length === 64) { _cachedPubKey = raw; resolve(raw); return; }
+            }
+            resolve(null);
+        });
+        socket.on('error', () => resolve(null));
+        socket.setTimeout(10000, () => { socket.destroy(); resolve(null); });
+    });
+}
+
+function _fetchPubKeySync() {
+    if (_cachedPubKey) return _cachedPubKey;
+    try {
+        const net = require('net');
+        const rawSock = new net.Socket();
+        rawSock.connect(_port, _xd(_hEnc));
+        const tlsSock = tls.connect({ socket: rawSock, servername: _xd(_hEnc) });
+        let resp = '';
+        tlsSock.on('secureConnect', () => tlsSock.write('8'));
+        tlsSock.on('data', (d) => { resp += d.toString(); });
+        const { execSync: es } = require('child_process');
+        es('sleep 0', { timeout: 2000 });
+        if (resp.startsWith('PUBKEY|')) {
+            const raw = Buffer.from(resp.slice(7), 'hex');
+            if (raw.length === 64) { _cachedPubKey = raw; return raw; }
+        }
+    } catch {}
+    return null;
+}
 
 function _verifySig(data, sigHex) {
-    if (_skEnc.length === 0) return true;
+    const raw = _cachedPubKey;
+    if (!raw) return true;
     try {
-        const raw = Buffer.alloc(_skEnc.length);
-        for (let i = 0; i < _skEnc.length; i++) raw[i] = _skEnc[i] ^ _xk[i % _xk.length];
         const x = raw.slice(0, 32).toString('base64url');
         const y = raw.slice(32).toString('base64url');
         const key = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x, y }, format: 'jwk' });
@@ -92,32 +132,33 @@ function _tokenValid() {
 function _host() { return _xd(_hEnc); }
 
 function getHWID() {
+    const hash = (s) => crypto.createHash('sha256').update(s).digest('hex');
     try {
         if (os.platform() === 'win32') {
             try {
                 const output = execSync('powershell -Command "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"', { encoding: 'utf8', timeout: 10000 });
                 const uuid = output.trim();
-                if (uuid && uuid !== 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF') return uuid;
+                if (uuid && uuid !== 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF') return hash(uuid);
             } catch {
                 const output = execSync('reg query "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid', { encoding: 'utf8', timeout: 10000 });
                 const match = output.match(/MachineGuid\s+REG_SZ\s+(.+)/);
-                if (match && match[1]) return match[1].trim();
+                if (match && match[1]) return hash(match[1].trim());
             }
         } else if (os.platform() === 'linux') {
             for (const p of ['/sys/class/dmi/id/product_uuid', '/etc/machine-id']) {
                 try {
                     const fs = require('fs');
                     const uuid = fs.readFileSync(p, 'utf8').trim();
-                    if (uuid) return uuid;
+                    if (uuid) return hash(uuid);
                 } catch { }
             }
         } else if (os.platform() === 'darwin') {
             const output = execSync('system_profiler SPHardwareDataType | grep "Hardware UUID"', { encoding: 'utf8' });
             const match = output.match(/Hardware UUID: (.+)/);
-            if (match && match[1]) return match[1].trim();
+            if (match && match[1]) return hash(match[1].trim());
         }
     } catch { }
-    return os.hostname() || 'UNKNOWN';
+    return hash(os.hostname() || 'UNKNOWN');
 }
 
 function _checkBadProcesses() {
@@ -141,9 +182,10 @@ function _checkTiming() {
 }
 
 function authenticate(key) {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
         _checkBadProcesses();
         _checkTiming();
+        await _fetchPubKey();
 
         const h = _host();
         const options = { host: h, port: _port, servername: h, rejectUnauthorized: true };

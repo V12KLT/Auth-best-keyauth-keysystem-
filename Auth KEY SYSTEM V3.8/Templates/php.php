@@ -6,18 +6,40 @@ $_port = 3389;
 $PROJECT_ID = 'ENTER_PROJECT_ID_HERE';
 
 $_cfEnc = [0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75];
-$_skEnc = [0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2];
+$_cachedPubKey = null;
+
+function fetchPubKey()
+{
+    global $_cachedPubKey, $_hEnc, $_port, $_xk;
+    if ($_cachedPubKey !== null)
+        return $_cachedPubKey;
+    try {
+        $host = xd($_hEnc);
+        $ctx = stream_context_create(['ssl' => ['verify_peer' => true, 'verify_peer_name' => true, 'peer_name' => $host]]);
+        $fp = @stream_socket_client("tls://$host:$_port", $errno, $errstr, 10, STREAM_CLIENT_CONNECT, $ctx);
+        if (!$fp)
+            return null;
+        fwrite($fp, "8");
+        $resp = fread($fp, 4096);
+        fclose($fp);
+        if (strpos($resp, 'PUBKEY|') === 0) {
+            $raw = hex2bin(substr($resp, 7));
+            if (strlen($raw) === 64) {
+                $_cachedPubKey = $raw;
+                return $raw;
+            }
+        }
+    } catch (\Exception $e) {
+    }
+    return null;
+}
 
 function verify_sig($data, $sigHex)
 {
-    global $_skEnc, $_xk;
-    if (empty($_skEnc))
+    $rawBytes = fetchPubKey();
+    if ($rawBytes === null)
         return true;
     try {
-        $raw = array_map(function ($i) use ($_skEnc, $_xk) {
-            return $_skEnc[$i] ^ $_xk[$i % count($_xk)];
-        }, range(0, count($_skEnc) - 1));
-        $rawBytes = pack('C*', ...$raw);
         $x = substr($rawBytes, 0, 32);
         $y = substr($rawBytes, 32, 32);
         $point = "\x04" . $x . $y;
@@ -130,24 +152,24 @@ function getHWID()
         $output = @shell_exec('powershell -Command "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"');
         $uuid = trim($output ?? '');
         if ($uuid && $uuid !== 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF')
-            return $uuid;
+            return hash('sha256', $uuid);
         $output = @shell_exec('reg query "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography" /v MachineGuid');
         if (preg_match('/MachineGuid\s+REG_SZ\s+(.+)/', $output, $matches))
-            return trim($matches[1]);
+            return hash('sha256', trim($matches[1]));
     } elseif (PHP_OS === 'Linux') {
         foreach (['/sys/class/dmi/id/product_uuid', '/etc/machine-id'] as $p) {
             if (file_exists($p)) {
                 $uuid = trim(file_get_contents($p));
                 if ($uuid)
-                    return $uuid;
+                    return hash('sha256', $uuid);
             }
         }
     } elseif (PHP_OS === 'Darwin') {
         $output = @shell_exec('system_profiler SPHardwareDataType | grep "Hardware UUID"');
         if (preg_match('/Hardware UUID:\s*(.+)/', $output, $matches))
-            return trim($matches[1]);
+            return hash('sha256', trim($matches[1]));
     }
-    return gethostname() ?: 'UNKNOWN';
+    return hash('sha256', gethostname() ?: 'UNKNOWN');
 }
 
 function checkDebugger()

@@ -275,19 +275,61 @@ inline std::string get_token_prefix() { return OBF_STR("AUTH_TOKEN_V2|"); }
 static const unsigned char CF_ENC[] = {0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75};
 static const int CF_ENC_LEN = sizeof(CF_ENC);
 
-static const unsigned char SK_ENC[] = {0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2};
-static const int SK_ENC_LEN = sizeof(SK_ENC);
+static std::vector<unsigned char> cachedPubKey;
+static bool pubKeyFetched = false;
+
+inline std::vector<unsigned char> fetchPubKey() {
+    if (pubKeyFetched && !cachedPubKey.empty()) return cachedPubKey;
+    std::string h = get_server_host();
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    SOCKET sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return {};
+    struct hostent* he = gethostbyname(h.c_str());
+    if (!he) { closesocket(sock); return {}; }
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    memcpy(&addr.sin_addr, he->h_addr, he->h_length);
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(sock); return {}; }
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, (int)sock);
+    SSL_set_tlsext_host_name(ssl, h.c_str());
+    if (SSL_connect(ssl) != 1) { SSL_free(ssl); SSL_CTX_free(ctx); closesocket(sock); return {}; }
+    SSL_write(ssl, "8", 1);
+    char buf[4096] = {};
+    int n = SSL_read(ssl, buf, sizeof(buf) - 1);
+    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); closesocket(sock);
+    if (n > 0) {
+        std::string resp(buf, n);
+        if (resp.rfind("PUBKEY|", 0) == 0) {
+            std::string hex = resp.substr(7);
+            if (hex.size() == 128) {
+                std::vector<unsigned char> raw(64);
+                auto hv = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? 10+c-'a' : c >= 'A' && c <= 'F' ? 10+c-'A' : -1; };
+                for (int i = 0; i < 64; i++) {
+                    int v1 = hv(hex[i*2]), v2 = hv(hex[i*2+1]);
+                    if (v1 < 0 || v2 < 0) return {};
+                    raw[i] = (unsigned char)(v1 * 16 + v2);
+                }
+                cachedPubKey = raw;
+                pubKeyFetched = true;
+                return raw;
+            }
+        }
+    }
+    return {};
+}
 
 inline bool verifySig(const std::string &data, const std::string &sigHex) {
-    if (SK_ENC_LEN <= 1) return true;
-    static const unsigned char xk[] = {0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9, 0x4F, 0xD2, 0x85, 0x33};
-    unsigned char raw[64];
-    for (int i = 0; i < SK_ENC_LEN && i < 64; i++) raw[i] = SK_ENC[i] ^ xk[i % 16];
+    auto raw = fetchPubKey();
+    if (raw.empty() || raw.size() != 64) return true;
 
     struct { ULONG Magic; ULONG cbKey; } blobHdr = {0x31534345, 32};
     unsigned char blob[8 + 64];
     memcpy(blob, &blobHdr, 8);
-    memcpy(blob + 8, raw, 64);
+    memcpy(blob + 8, raw.data(), 64);
 
     BCRYPT_ALG_HANDLE hAlg = NULL; BCRYPT_KEY_HANDLE hKey = NULL; BCRYPT_HASH_HANDLE hHash = NULL;
     bool result = false;

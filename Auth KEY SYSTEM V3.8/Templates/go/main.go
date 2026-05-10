@@ -21,15 +21,41 @@ import (
 )
 
 var cfEnc = []byte{0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75}
-var skEnc = []byte{0xB8, 0xBF, 0xD5, 0x63, 0x73, 0xEC, 0x9C, 0x4B, 0x82, 0x8D, 0xAF, 0x84, 0x32, 0x17, 0x3D, 0x78, 0xF8, 0xCC, 0x41, 0xCB, 0x8A, 0x5D, 0x3B, 0xCD, 0xE9, 0x7C, 0x60, 0x7C, 0x2E, 0x32, 0x0E, 0x33, 0x5B, 0xB5, 0x7C, 0x8D, 0xEE, 0x21, 0x14, 0x56, 0x70, 0x9F, 0xA3, 0x6D, 0x4D, 0x6F, 0x4B, 0xE8, 0x02, 0xC5, 0x6E, 0xE5, 0x7F, 0x33, 0xBC, 0x21, 0x8C, 0x7E, 0xF4, 0xAB, 0x7B, 0x56, 0x1C, 0xA2}
+var cachedPubKey []byte
+
+func fetchPubKey() []byte {
+	if cachedPubKey != nil {
+		return cachedPubKey
+	}
+	h := host()
+	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", h, port), &tls.Config{ServerName: h})
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.Write([]byte("8"))
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil || n == 0 {
+		return nil
+	}
+	resp := string(buf[:n])
+	if !strings.HasPrefix(resp, "PUBKEY|") {
+		return nil
+	}
+	raw, err := hex.DecodeString(resp[7:])
+	if err != nil || len(raw) != 64 {
+		return nil
+	}
+	cachedPubKey = raw
+	return raw
+}
 
 func verifySig(data string, sigHex string) bool {
-	if len(skEnc) == 0 {
+	raw := fetchPubKey()
+	if raw == nil {
 		return true
-	}
-	raw := make([]byte, len(skEnc))
-	for i := range skEnc {
-		raw[i] = skEnc[i] ^ xk[i%len(xk)]
 	}
 	x := new(big.Int).SetBytes(raw[:32])
 	y := new(big.Int).SetBytes(raw[32:])
@@ -145,13 +171,16 @@ func hmacSha256(key, data string) string {
 }
 
 func getHWID() string {
+	var raw string
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("powershell", "-Command", "Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID")
 		output, err := cmd.Output()
 		if err == nil {
 			uuid := strings.TrimSpace(string(output))
 			if uuid != "" && uuid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF" {
-				return uuid
+				raw = uuid
+				h := sha256.Sum256([]byte(raw))
+				return hex.EncodeToString(h[:])
 			}
 		}
 		cmd = exec.Command("reg", "query", "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid")
@@ -162,7 +191,9 @@ func getHWID() string {
 				if strings.Contains(line, "MachineGuid") {
 					parts := strings.Fields(line)
 					if len(parts) >= 3 {
-						return parts[2]
+						raw = parts[2]
+						h := sha256.Sum256([]byte(raw))
+						return hex.EncodeToString(h[:])
 					}
 				}
 			}
@@ -173,7 +204,8 @@ func getHWID() string {
 			if err == nil {
 				uuid := strings.TrimSpace(string(data))
 				if uuid != "" {
-					return uuid
+					h := sha256.Sum256([]byte(uuid))
+					return hex.EncodeToString(h[:])
 				}
 			}
 		}
@@ -187,7 +219,8 @@ func getHWID() string {
 					if len(parts) >= 2 {
 						uuid := strings.TrimSpace(parts[1])
 						if uuid != "" {
-							return uuid
+							h := sha256.Sum256([]byte(uuid))
+							return hex.EncodeToString(h[:])
 						}
 					}
 				}
@@ -196,9 +229,10 @@ func getHWID() string {
 	}
 	hostname, err := os.Hostname()
 	if err != nil {
-		return "UNKNOWN"
+		hostname = "UNKNOWN"
 	}
-	return hostname
+	h := sha256.Sum256([]byte(hostname))
+	return hex.EncodeToString(h[:])
 }
 
 func checkBadProcesses() {
