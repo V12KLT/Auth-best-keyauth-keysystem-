@@ -597,7 +597,7 @@ def call_webhook(project_id, key, webhook_name, payload=None):
         return None
 
 
-PROJECT_ID = "fcc12688a8c9aae2386929b2a5cf473d"
+PROJECT_ID = "ENTER_PROJECT_ID_HERE"
 key = input("Enter your license key: ")
 if authenticate(PROJECT_ID, key):
     start_session(PROJECT_ID, key)

@@ -216,29 +216,20 @@ public class KeyAuth
         try
         {
             string host = Host();
-            Console.WriteLine($"[DEBUG] Connecting to {host}:{_port}...");
             using (var client = new TcpClient())
             {
                 if (!client.ConnectAsync(host, _port).Wait(15000))
-                {
-                    Console.WriteLine("[DEBUG] Connection timed out");
                     return false;
-                }
-                Console.WriteLine("[DEBUG] Connected, starting TLS...");
+
                 using (var sslStream = new SslStream(client.GetStream(), false, ValidateCert))
                 {
                     sslStream.AuthenticateAsClient(host);
-                    Console.WriteLine($"[DEBUG] TLS established, cert hash: {_lastCertHash}");
 
                     if (_cfEnc.Length > 0 && _lastCertHash != null)
                     {
                         string expected = Xd(_cfEnc).ToUpper();
                         if (_lastCertHash != expected)
-                        {
-                            Console.WriteLine($"[DEBUG] Cert pin FAILED: expected={expected}, got={_lastCertHash}");
                             return false;
-                        }
-                        Console.WriteLine("[DEBUG] Cert pin OK");
                     }
 
                     byte[] handshake = Encoding.UTF8.GetBytes("2");
@@ -246,7 +237,6 @@ public class KeyAuth
                     Thread.Sleep(200);
 
                     string hwid = GetHWID();
-                    Console.WriteLine($"[DEBUG] HWID: {hwid}");
                     string authData = $"{PROJECT_ID}|{key}|{hwid}";
                     byte[] data = Encoding.UTF8.GetBytes(authData);
                     sslStream.Write(data, 0, data.Length);
@@ -254,47 +244,38 @@ public class KeyAuth
                     byte[] buffer = new byte[4096];
                     int bytesRead = sslStream.Read(buffer, 0, buffer.Length);
                     string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"[DEBUG] Server response: {response}");
 
                     if (!response.StartsWith("CHALLENGE|"))
-                    {
-                        Console.WriteLine($"[DEBUG] Expected CHALLENGE, got: {response}");
                         return false;
-                    }
 
                     string[] parts = response.Split('|');
-                    if (parts.Length != 3) { Console.WriteLine($"[DEBUG] Bad challenge parts: {parts.Length}"); return false; }
+                    if (parts.Length != 3) return false;
                     string challenge = parts[2];
                     string sig = HmacSha256(key, parts[2]);
                     byte[] respBytes = Encoding.UTF8.GetBytes($"RESPONSE|{parts[1]}|{sig}");
                     sslStream.Write(respBytes, 0, respBytes.Length);
                     bytesRead = sslStream.Read(buffer, 0, buffer.Length);
                     response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"[DEBUG] Final response: {response}");
 
                     if (!response.StartsWith("ACCESS|"))
-                    {
-                        Console.WriteLine($"[DEBUG] Expected ACCESS, got: {response}");
                         return false;
-                    }
 
                     string[] accessParts = response.Split('|');
-                    if (accessParts.Length < 4) { Console.WriteLine("[DEBUG] Bad access parts"); return false; }
+                    if (accessParts.Length < 4) return false;
                     string accessToken = accessParts[1];
                     string serverProof = accessParts[2];
                     string authSig = accessParts[3];
                     string expectedProof = HmacSha256(key, challenge + "|" + accessToken);
-                    if (serverProof != expectedProof) { Console.WriteLine("[DEBUG] Server proof mismatch"); return false; }
-                    if (!VerifySig(challenge + "|" + accessToken, authSig)) { Console.WriteLine("[DEBUG] Sig verify failed"); return false; }
+                    if (serverProof != expectedProof) return false;
+                    if (!VerifySig(challenge + "|" + accessToken, authSig)) return false;
 
                     string rawToken = $"AUTH_TOKEN_V2|{accessToken}|{HmacSha256(key, accessToken)}";
                     StoreToken(rawToken);
-                    Console.WriteLine("[DEBUG] Auth success!");
                     return true;
                 }
             }
         }
-        catch (Exception ex) { Console.WriteLine($"[DEBUG] Exception: {ex}"); return false; }
+        catch { return false; }
     }
 
     private static bool ValidateCert(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors)
@@ -564,14 +545,9 @@ public class KeyAuth
         {
             Console.WriteLine("Authenticated.");
             StartSessionValidation(key);
-            Console.WriteLine("\nPress any key to keep the session alive (or close this window to exit).");
-            Console.ReadKey();
         }
         else
         {
-            Console.WriteLine("failed");
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
             Environment.Exit(1);
         }
     }
