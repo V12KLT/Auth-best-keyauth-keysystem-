@@ -1,7 +1,3 @@
-#pragma once
-#ifndef _KEYAUTH_CLIENT_HPP_
-#define _KEYAUTH_CLIENT_HPP_
-
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -12,6 +8,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <objbase.h>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -20,12 +17,15 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+
 #define SECURITY_WIN32
 #include <bcrypt.h>
 #include <schannel.h>
 #include <security.h>
+#include <shellapi.h>
 #include <sspi.h>
 #include <tlhelp32.h>
+
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "secur32.lib")
@@ -34,8 +34,6 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
-
-#include <shellapi.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -88,7 +86,7 @@ public:
   }
   operator std::string() const { return str(); }
 };
-}
+} // namespace obf_detail
 
 #define OBF(s)                                                                 \
   (obf_detail::ObfString<sizeof(s)>(s, obf_detail::SEED ^ __LINE__))
@@ -204,6 +202,7 @@ inline void stealth_hide_thread(HANDLE hThread) {
 }
 
 inline void check_debugger() {
+#ifndef _DEBUG
   auto &api = getAPIs();
   if (api.pIsDebuggerPresent && api.pIsDebuggerPresent())
     stealth_exit();
@@ -220,9 +219,11 @@ inline void check_debugger() {
     if (debugPort)
       stealth_exit();
   }
+#endif
 }
 
 inline void check_bad_processes() {
+#ifndef _DEBUG
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snap == INVALID_HANDLE_VALUE)
     return;
@@ -258,8 +259,9 @@ inline void check_bad_processes() {
     } while (Process32NextW(snap, &pe));
   }
   CloseHandle(snap);
+#endif
 }
-}
+} // namespace api_hide
 
 static const unsigned char TOKEN_XOR_KEY[] = {
     0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16,
@@ -272,286 +274,20 @@ inline int get_server_port() { return 3389; }
 inline std::string get_project_id() { return OBF_STR("ENTER_PROJECT_ID_HERE"); }
 inline std::string get_token_prefix() { return OBF_STR("AUTH_TOKEN_V2|"); }
 
-static const unsigned char CF_ENC[] = {0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55, 0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80, 0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2, 0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88, 0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D, 0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75};
+static const unsigned char CF_ENC[] = {
+    0x94, 0x7E, 0xB1, 0x6A, 0xD4, 0xF0, 0x5A, 0x3D, 0xDA, 0x3C, 0x55,
+    0xFA, 0x77, 0x97, 0xB2, 0x71, 0xE5, 0x0F, 0xC4, 0x68, 0xD3, 0x80,
+    0x29, 0x3F, 0xA0, 0x39, 0x23, 0x89, 0x0A, 0xE7, 0xC0, 0x72, 0xE2,
+    0x0F, 0xC4, 0x68, 0xA7, 0x87, 0x2C, 0x3F, 0xA7, 0x3E, 0x57, 0x88,
+    0x09, 0xE3, 0xC6, 0x70, 0x95, 0x0F, 0xB6, 0x6D, 0xD5, 0xF3, 0x2D,
+    0x39, 0xD2, 0x4B, 0x25, 0x8C, 0x09, 0xEA, 0xB3, 0x75};
 static const int CF_ENC_LEN = sizeof(CF_ENC);
 
 static std::vector<unsigned char> cachedPubKey;
 static bool pubKeyFetched = false;
 
-inline std::vector<unsigned char> fetchPubKey() {
-    if (pubKeyFetched && !cachedPubKey.empty()) return cachedPubKey;
-    std::string h = get_server_host();
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-    SOCKET sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) return {};
-    struct hostent* he = gethostbyname(h.c_str());
-    if (!he) { closesocket(sock); return {}; }
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    memcpy(&addr.sin_addr, he->h_addr, he->h_length);
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(sock); return {}; }
-    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
-    SSL* ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, (int)sock);
-    SSL_set_tlsext_host_name(ssl, h.c_str());
-    if (SSL_connect(ssl) != 1) { SSL_free(ssl); SSL_CTX_free(ctx); closesocket(sock); return {}; }
-    SSL_write(ssl, "8", 1);
-    char buf[4096] = {};
-    int n = SSL_read(ssl, buf, sizeof(buf) - 1);
-    SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); closesocket(sock);
-    if (n > 0) {
-        std::string resp(buf, n);
-        if (resp.rfind("PUBKEY|", 0) == 0) {
-            std::string hex = resp.substr(7);
-            if (hex.size() == 128) {
-                std::vector<unsigned char> raw(64);
-                auto hv = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? 10+c-'a' : c >= 'A' && c <= 'F' ? 10+c-'A' : -1; };
-                for (int i = 0; i < 64; i++) {
-                    int v1 = hv(hex[i*2]), v2 = hv(hex[i*2+1]);
-                    if (v1 < 0 || v2 < 0) return {};
-                    raw[i] = (unsigned char)(v1 * 16 + v2);
-                }
-                cachedPubKey = raw;
-                pubKeyFetched = true;
-                return raw;
-            }
-        }
-    }
-    return {};
-}
-
-inline bool verifySig(const std::string &data, const std::string &sigHex) {
-    auto raw = fetchPubKey();
-    if (raw.empty() || raw.size() != 64) return true;
-
-    struct { ULONG Magic; ULONG cbKey; } blobHdr = {0x31534345, 32};
-    unsigned char blob[8 + 64];
-    memcpy(blob, &blobHdr, 8);
-    memcpy(blob + 8, raw.data(), 64);
-
-    BCRYPT_ALG_HANDLE hAlg = NULL; BCRYPT_KEY_HANDLE hKey = NULL; BCRYPT_HASH_HANDLE hHash = NULL;
-    bool result = false;
-    if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0))) return true;
-    if (!NT_SUCCESS(BCryptImportKeyPair(hAlg, NULL, BCRYPT_ECCPUBLIC_BLOB, &hKey, blob, sizeof(blob), 0))) { BCryptCloseAlgorithmProvider(hAlg, 0); return true; }
-
-    BCRYPT_ALG_HANDLE hSha = NULL;
-    if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&hSha, BCRYPT_SHA256_ALGORITHM, NULL, 0))) goto cleanup;
-    unsigned char hash[32]; ULONG hashLen = 0;
-    if (!NT_SUCCESS(BCryptCreateHash(hSha, &hHash, NULL, 0, NULL, 0, 0))) { BCryptCloseAlgorithmProvider(hSha, 0); goto cleanup; }
-    BCryptHashData(hHash, (PUCHAR)data.c_str(), (ULONG)data.size(), 0);
-    BCryptFinishHash(hHash, hash, 32, 0);
-    BCryptDestroyHash(hHash);
-    BCryptCloseAlgorithmProvider(hSha, 0);
-
-    { unsigned char sig[64];
-      if (sigHex.size() != 128) goto cleanup;
-      for (int i = 0; i < 64; i++) {
-        char h1 = sigHex[i*2], h2 = sigHex[i*2+1];
-        auto hv = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? 10+c-'a' : c >= 'A' && c <= 'F' ? 10+c-'A' : -1; };
-        int v1 = hv(h1), v2 = hv(h2); if (v1 < 0 || v2 < 0) goto cleanup;
-        sig[i] = (unsigned char)(v1 * 16 + v2);
-      }
-      result = NT_SUCCESS(BCryptVerifySignature(hKey, NULL, hash, 32, sig, 64, 0));
-    }
-cleanup:
-    if (hKey) BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return result;
-}
-
 inline std::string sha256(const std::string &str);
-
-inline std::string decodeCfEnc() {
-    if (CF_ENC_LEN <= 1) return "";
-    static const unsigned char xk[] = {0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4, 0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9, 0x4F, 0xD2, 0x85, 0x33};
-    std::string result(CF_ENC_LEN, '\0');
-    for (int i = 0; i < CF_ENC_LEN; i++) result[i] = CF_ENC[i] ^ xk[i % 16];
-    return result;
-}
-
-inline bool verifyCertPin(CtxtHandle &hCtx) {
-    std::string expected = decodeCfEnc();
-    if (expected.empty()) return true;
-
-    PCCERT_CONTEXT pCert = NULL;
-    SECURITY_STATUS status = QueryContextAttributes(&hCtx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &pCert);
-    if (status != SEC_E_OK || !pCert) return false;
-
-    std::string certHash = sha256(std::string((char *)pCert->pbCertEncoded, pCert->cbCertEncoded));
-    CertFreeCertificateContext(pCert);
-
-    std::string normalizedExpected;
-    for (char c : expected) normalizedExpected += (char)toupper(c);
-    std::string normalizedHash;
-    for (char c : certHash) normalizedHash += (char)toupper(c);
-
-    return normalizedHash == normalizedExpected;
-}
-
-
-inline std::vector<unsigned char> g_encryptedToken;
-inline uint32_t g_tokenCanary = 0;
-inline bool g_tokenPresent = false;
-
-inline void xorEncryptDecrypt(const std::string &input,
-                              std::vector<unsigned char> &output) {
-  output.resize(input.size());
-  for (size_t i = 0; i < input.size(); i++)
-    output[i] = (unsigned char)input[i] ^ TOKEN_XOR_KEY[i % TOKEN_XOR_KEY_LEN];
-}
-
-inline std::string xorDecrypt(const std::vector<unsigned char> &input) {
-  std::string output(input.size(), '\0');
-  for (size_t i = 0; i < input.size(); i++)
-    output[i] = (char)(input[i] ^ TOKEN_XOR_KEY[i % TOKEN_XOR_KEY_LEN]);
-  return output;
-}
-
-inline uint32_t computeTokenCanary(const std::vector<unsigned char> &data) {
-  uint32_t hash = 0x811C9DC5;
-  for (auto b : data) {
-    hash ^= b;
-    hash *= 0x01000193;
-  }
-  return hash ^ 0xDEADBEEF;
-}
-
-inline void storeToken(const std::string &token) {
-  xorEncryptDecrypt(token, g_encryptedToken);
-  g_tokenCanary = computeTokenCanary(g_encryptedToken);
-  g_tokenPresent = true;
-}
-
-inline std::string getDecryptedToken() {
-  if (!g_tokenPresent || g_encryptedToken.empty())
-    return "";
-  if (computeTokenCanary(g_encryptedToken) != g_tokenCanary) {
-    api_hide::stealth_exit();
-    return "";
-  }
-  return xorDecrypt(g_encryptedToken);
-}
-
-inline bool isTokenValid() {
-  std::string token = getDecryptedToken();
-  if (token.empty())
-    return false;
-  if (token.substr(0, 14) != get_token_prefix())
-    return false;
-  if (token.length() <= 22)
-    return false;
-  return true;
-}
-
-inline std::string getHWID() {
-  auto runWmic = [](const char *cls, const char *prop) -> std::string {
-    std::string cmd = std::string("wmic path ") + cls + " get " + prop;
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE hReadPipe, hWritePipe;
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
-      return "";
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    si.hStdOutput = hWritePipe;
-    si.hStdError = hWritePipe;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, TRUE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-      CloseHandle(hReadPipe);
-      CloseHandle(hWritePipe);
-      return "";
-    }
-    CloseHandle(hWritePipe);
-    WaitForSingleObject(pi.hProcess, 3000);
-    char buf[1024] = {};
-    DWORD bytesRead = 0;
-    ReadFile(hReadPipe, buf, sizeof(buf) - 1, &bytesRead, NULL);
-    CloseHandle(hReadPipe);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    std::string out(buf, bytesRead);
-    size_t nl = out.find('\n');
-    if (nl == std::string::npos)
-      return "";
-    std::string val = out.substr(nl + 1);
-    size_t start = val.find_first_not_of(" \t\r\n");
-    size_t end = val.find_last_not_of(" \t\r\n");
-    if (start == std::string::npos)
-      return "";
-    return val.substr(start, end - start + 1);
-  };
-  std::string cpuId = runWmic("Win32_Processor", "ProcessorId");
-  std::string mbSerial = runWmic("Win32_BaseBoard", "SerialNumber");
-  std::string biosSerial = runWmic("Win32_BIOS", "SerialNumber");
-  std::string combined = cpuId + "|" + mbSerial + "|" + biosSerial;
-
-  extern std::string sha256(const std::string &str);
-  return sha256(combined);
-}
-
-inline std::string sha256(const std::string &str) {
-  BCRYPT_ALG_HANDLE hAlg = NULL;
-  BCRYPT_HASH_HANDLE hHash = NULL;
-  if (!NT_SUCCESS(
-          BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0)))
-    return "";
-  DWORD cbHashObject, cbData;
-  BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PBYTE)&cbHashObject,
-                    sizeof(DWORD), &cbData, 0);
-  std::vector<BYTE> pbHashObject(cbHashObject);
-  if (!NT_SUCCESS(BCryptCreateHash(hAlg, &hHash, pbHashObject.data(),
-                                   cbHashObject, NULL, 0, 0))) {
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return "";
-  }
-  BCryptHashData(hHash, (PBYTE)str.c_str(), (ULONG)str.length(), 0);
-  DWORD cbHash;
-  BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, (PBYTE)&cbHash, sizeof(DWORD),
-                    &cbData, 0);
-  std::vector<BYTE> pbHash(cbHash);
-  BCryptFinishHash(hHash, pbHash.data(), cbHash, 0);
-  std::stringstream ss;
-  for (BYTE b : pbHash)
-    ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
-  BCryptDestroyHash(hHash);
-  BCryptCloseAlgorithmProvider(hAlg, 0);
-  return ss.str();
-}
-
-inline std::string hmacSha256(const std::string &key, const std::string &data) {
-  BCRYPT_ALG_HANDLE hAlg = NULL;
-  BCRYPT_HASH_HANDLE hHash = NULL;
-  if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(
-          &hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG)))
-    return "";
-  DWORD cbHashObject, cbData;
-  BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PBYTE)&cbHashObject,
-                    sizeof(DWORD), &cbData, 0);
-  std::vector<BYTE> pbHashObject(cbHashObject);
-  if (!NT_SUCCESS(BCryptCreateHash(hAlg, &hHash, pbHashObject.data(),
-                                   cbHashObject, (PBYTE)key.c_str(),
-                                   (ULONG)key.length(), 0))) {
-    BCryptCloseAlgorithmProvider(hAlg, 0);
-    return "";
-  }
-  BCryptHashData(hHash, (PBYTE)data.c_str(), (ULONG)data.length(), 0);
-  DWORD cbHash;
-  BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, (PBYTE)&cbHash, sizeof(DWORD),
-                    &cbData, 0);
-  std::vector<BYTE> pbHash(cbHash);
-  BCryptFinishHash(hHash, pbHash.data(), cbHash, 0);
-  std::stringstream ss;
-  for (BYTE b : pbHash)
-    ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
-  BCryptDestroyHash(hHash);
-  BCryptCloseAlgorithmProvider(hAlg, 0);
-  return ss.str();
-}
+inline std::string hmacSha256(const std::string &key, const std::string &data);
 
 class MiniSsl {
   SOCKET sock;
@@ -705,6 +441,347 @@ public:
   }
 };
 
+inline std::vector<unsigned char> fetchPubKey() {
+  if (pubKeyFetched && !cachedPubKey.empty())
+    return cachedPubKey;
+
+  WSADATA wsaData;
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    return {};
+
+  std::string h = get_server_host();
+  struct addrinfo hints = {0}, *result = NULL;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  if (getaddrinfo(h.c_str(), std::to_string(get_server_port()).c_str(), &hints,
+                  &result) != 0) {
+    WSACleanup();
+    return {};
+  }
+
+  SOCKET sock =
+      socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+  if (sock == INVALID_SOCKET) {
+    freeaddrinfo(result);
+    WSACleanup();
+    return {};
+  }
+  if (connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
+    closesocket(sock);
+    freeaddrinfo(result);
+    WSACleanup();
+    return {};
+  }
+  freeaddrinfo(result);
+
+  MiniSsl ssl(sock);
+  if (!ssl.Connect(h)) {
+    closesocket(sock);
+    WSACleanup();
+    return {};
+  }
+
+  ssl.Write("8", 1);
+  char buf[4096] = {};
+  int n = ssl.Read(buf, sizeof(buf) - 1);
+  closesocket(sock);
+  WSACleanup();
+
+  if (n > 0) {
+    std::string resp(buf, n);
+    if (resp.rfind("PUBKEY|", 0) == 0) {
+      std::string hex = resp.substr(7);
+      if (hex.size() == 128) {
+        std::vector<unsigned char> raw(64);
+        auto hv = [](char c) -> int {
+          return c >= '0' && c <= '9'   ? c - '0'
+                 : c >= 'a' && c <= 'f' ? 10 + c - 'a'
+                 : c >= 'A' && c <= 'F' ? 10 + c - 'A'
+                                        : -1;
+        };
+        for (int i = 0; i < 64; i++) {
+          int v1 = hv(hex[i * 2]), v2 = hv(hex[i * 2 + 1]);
+          if (v1 < 0 || v2 < 0)
+            return {};
+          raw[i] = (unsigned char)(v1 * 16 + v2);
+        }
+        cachedPubKey = raw;
+        pubKeyFetched = true;
+        return raw;
+      }
+    }
+  }
+  return {};
+}
+
+inline bool verifySig(const std::string &data, const std::string &sigHex) {
+  auto raw = fetchPubKey();
+  if (raw.empty() || raw.size() != 64)
+    return true;
+
+  struct {
+    ULONG Magic;
+    ULONG cbKey;
+  } blobHdr = {0x31534345, 32};
+  unsigned char blob[8 + 64];
+  memcpy(blob, &blobHdr, 8);
+  memcpy(blob + 8, raw.data(), 64);
+
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_KEY_HANDLE hKey = NULL;
+  BCRYPT_HASH_HANDLE hHash = NULL;
+  BCRYPT_ALG_HANDLE hSha = NULL;
+  bool result = false;
+  unsigned char hash[32] = {0};
+  unsigned char sig[64] = {0};
+
+  if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(
+          &hAlg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0)))
+    return true;
+  if (!NT_SUCCESS(BCryptImportKeyPair(hAlg, NULL, BCRYPT_ECCPUBLIC_BLOB, &hKey,
+                                      blob, sizeof(blob), 0))) {
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return true;
+  }
+
+  if (!NT_SUCCESS(
+          BCryptOpenAlgorithmProvider(&hSha, BCRYPT_SHA256_ALGORITHM, NULL, 0)))
+    goto cleanup;
+  if (!NT_SUCCESS(BCryptCreateHash(hSha, &hHash, NULL, 0, NULL, 0, 0)))
+    goto cleanup;
+  BCryptHashData(hHash, (PUCHAR)data.c_str(), (ULONG)data.size(), 0);
+  BCryptFinishHash(hHash, hash, 32, 0);
+  BCryptDestroyHash(hHash);
+  hHash = NULL;
+
+  if (sigHex.size() != 128)
+    goto cleanup;
+  {
+    auto hv = [](char c) -> int {
+      return c >= '0' && c <= '9'   ? c - '0'
+             : c >= 'a' && c <= 'f' ? 10 + c - 'a'
+             : c >= 'A' && c <= 'F' ? 10 + c - 'A'
+                                    : -1;
+    };
+    for (int i = 0; i < 64; i++) {
+      int v1 = hv(sigHex[i * 2]), v2 = hv(sigHex[i * 2 + 1]);
+      if (v1 < 0 || v2 < 0)
+        goto cleanup;
+      sig[i] = (unsigned char)(v1 * 16 + v2);
+    }
+  }
+  result = NT_SUCCESS(BCryptVerifySignature(hKey, NULL, hash, 32, sig, 64, 0));
+
+cleanup:
+  if (hHash)
+    BCryptDestroyHash(hHash);
+  if (hSha)
+    BCryptCloseAlgorithmProvider(hSha, 0);
+  if (hKey)
+    BCryptDestroyKey(hKey);
+  if (hAlg)
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+  return result;
+}
+
+inline std::string decodeCfEnc() {
+  if (CF_ENC_LEN <= 1)
+    return "";
+  static const unsigned char xk[] = {0xA7, 0x3B, 0xF2, 0x5E, 0x91, 0xC4,
+                                     0x68, 0x0D, 0xE3, 0x7A, 0x16, 0xB9,
+                                     0x4F, 0xD2, 0x85, 0x33};
+  std::string result(CF_ENC_LEN, '\0');
+  for (int i = 0; i < CF_ENC_LEN; i++)
+    result[i] = CF_ENC[i] ^ xk[i % 16];
+  return result;
+}
+
+inline bool verifyCertPin(CtxtHandle &hCtx) {
+  std::string expected = decodeCfEnc();
+  if (expected.empty())
+    return true;
+
+  PCCERT_CONTEXT pCert = NULL;
+  SECURITY_STATUS status =
+      QueryContextAttributes(&hCtx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &pCert);
+  if (status != SEC_E_OK || !pCert)
+    return false;
+
+  std::string certHash =
+      sha256(std::string((char *)pCert->pbCertEncoded, pCert->cbCertEncoded));
+  CertFreeCertificateContext(pCert);
+
+  std::string normalizedExpected;
+  for (char c : expected)
+    normalizedExpected += (char)toupper(c);
+  std::string normalizedHash;
+  for (char c : certHash)
+    normalizedHash += (char)toupper(c);
+
+  return normalizedHash == normalizedExpected;
+}
+
+std::vector<unsigned char> g_encryptedToken;
+uint32_t g_tokenCanary = 0;
+bool g_tokenPresent = false;
+
+inline void xorEncryptDecrypt(const std::string &input,
+                              std::vector<unsigned char> &output) {
+  output.resize(input.size());
+  for (size_t i = 0; i < input.size(); i++)
+    output[i] = (unsigned char)input[i] ^ TOKEN_XOR_KEY[i % TOKEN_XOR_KEY_LEN];
+}
+
+inline std::string xorDecrypt(const std::vector<unsigned char> &input) {
+  std::string output(input.size(), '\0');
+  for (size_t i = 0; i < input.size(); i++)
+    output[i] = (char)(input[i] ^ TOKEN_XOR_KEY[i % TOKEN_XOR_KEY_LEN]);
+  return output;
+}
+
+inline uint32_t computeTokenCanary(const std::vector<unsigned char> &data) {
+  uint32_t hash = 0x811C9DC5;
+  for (auto b : data) {
+    hash ^= b;
+    hash *= 0x01000193;
+  }
+  return hash ^ 0xDEADBEEF;
+}
+
+inline void storeToken(const std::string &token) {
+  xorEncryptDecrypt(token, g_encryptedToken);
+  g_tokenCanary = computeTokenCanary(g_encryptedToken);
+  g_tokenPresent = true;
+}
+
+inline std::string getDecryptedToken() {
+  if (!g_tokenPresent || g_encryptedToken.empty())
+    return "";
+  if (computeTokenCanary(g_encryptedToken) != g_tokenCanary) {
+    api_hide::stealth_exit();
+    return "";
+  }
+  return xorDecrypt(g_encryptedToken);
+}
+
+inline bool isTokenValid() {
+  std::string token = getDecryptedToken();
+  if (token.empty())
+    return false;
+  if (token.substr(0, 14) != get_token_prefix())
+    return false;
+  if (token.length() <= 22)
+    return false;
+  return true;
+}
+
+inline std::string getHWID() {
+  auto runWmic = [](const char *cls, const char *prop) -> std::string {
+    std::string cmd = std::string("wmic path ") + cls + " get " + prop;
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hReadPipe, hWritePipe;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
+      return "";
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+      CloseHandle(hReadPipe);
+      CloseHandle(hWritePipe);
+      return "";
+    }
+    CloseHandle(hWritePipe);
+    WaitForSingleObject(pi.hProcess, 3000);
+    char buf[1024] = {};
+    DWORD bytesRead = 0;
+    ReadFile(hReadPipe, buf, sizeof(buf) - 1, &bytesRead, NULL);
+    CloseHandle(hReadPipe);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    std::string out(buf, bytesRead);
+    size_t nl = out.find('\n');
+    if (nl == std::string::npos)
+      return "";
+    std::string val = out.substr(nl + 1);
+    size_t start = val.find_first_not_of(" \t\r\n");
+    size_t end = val.find_last_not_of(" \t\r\n");
+    if (start == std::string::npos)
+      return "";
+    return val.substr(start, end - start + 1);
+  };
+  std::string cpuId = runWmic("Win32_Processor", "ProcessorId");
+  std::string mbSerial = runWmic("Win32_BaseBoard", "SerialNumber");
+  std::string biosSerial = runWmic("Win32_BIOS", "SerialNumber");
+  std::string combined = cpuId + "|" + mbSerial + "|" + biosSerial;
+  return sha256(combined);
+}
+
+inline std::string sha256(const std::string &str) {
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_HASH_HANDLE hHash = NULL;
+  if (!NT_SUCCESS(
+          BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0)))
+    return "";
+  DWORD cbHashObject, cbData;
+  BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PBYTE)&cbHashObject,
+                    sizeof(DWORD), &cbData, 0);
+  std::vector<BYTE> pbHashObject(cbHashObject);
+  if (!NT_SUCCESS(BCryptCreateHash(hAlg, &hHash, pbHashObject.data(),
+                                   cbHashObject, NULL, 0, 0))) {
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return "";
+  }
+  BCryptHashData(hHash, (PBYTE)str.c_str(), (ULONG)str.length(), 0);
+  DWORD cbHash;
+  BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, (PBYTE)&cbHash, sizeof(DWORD),
+                    &cbData, 0);
+  std::vector<BYTE> pbHash(cbHash);
+  BCryptFinishHash(hHash, pbHash.data(), cbHash, 0);
+  std::stringstream ss;
+  for (BYTE b : pbHash)
+    ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+  BCryptDestroyHash(hHash);
+  BCryptCloseAlgorithmProvider(hAlg, 0);
+  return ss.str();
+}
+
+inline std::string hmacSha256(const std::string &key, const std::string &data) {
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_HASH_HANDLE hHash = NULL;
+  if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(
+          &hAlg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG)))
+    return "";
+  DWORD cbHashObject, cbData;
+  BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PBYTE)&cbHashObject,
+                    sizeof(DWORD), &cbData, 0);
+  std::vector<BYTE> pbHashObject(cbHashObject);
+  if (!NT_SUCCESS(BCryptCreateHash(hAlg, &hHash, pbHashObject.data(),
+                                   cbHashObject, (PBYTE)key.c_str(),
+                                   (ULONG)key.length(), 0))) {
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return "";
+  }
+  BCryptHashData(hHash, (PBYTE)data.c_str(), (ULONG)data.length(), 0);
+  DWORD cbHash;
+  BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, (PBYTE)&cbHash, sizeof(DWORD),
+                    &cbData, 0);
+  std::vector<BYTE> pbHash(cbHash);
+  BCryptFinishHash(hHash, pbHash.data(), cbHash, 0);
+  std::stringstream ss;
+  for (BYTE b : pbHash)
+    ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+  BCryptDestroyHash(hHash);
+  BCryptCloseAlgorithmProvider(hAlg, 0);
+  return ss.str();
+}
+
 inline std::string authenticate(const std::string &key, std::string &out_data) {
   api_hide::check_debugger();
   api_hide::check_bad_processes();
@@ -800,22 +877,26 @@ inline std::string authenticate(const std::string &key, std::string &out_data) {
       std::string finalResult(buffer, bytesRead);
       if (finalResult.find("ACCESS|") == 0) {
         size_t p1 = finalResult.find('|');
-          size_t p2 = finalResult.find('|', p1 + 1);
-          size_t p3 = finalResult.find('|', p2 + 1);
-          if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos) {
+        size_t p2 = finalResult.find('|', p1 + 1);
+        size_t p3 = finalResult.find('|', p2 + 1);
+        if (p1 == std::string::npos || p2 == std::string::npos ||
+            p3 == std::string::npos) {
+          out_data = OBF_STR("Refused");
+        } else {
+          std::string accessToken = finalResult.substr(p1 + 1, p2 - p1 - 1);
+          std::string serverProof = finalResult.substr(p2 + 1, p3 - p2 - 1);
+          std::string authSig = finalResult.substr(p3 + 1);
+          std::string expectedProof =
+              hmacSha256(key, challenge + "|" + accessToken);
+          if (serverProof != expectedProof ||
+              !verifySig(challenge + "|" + accessToken, authSig)) {
             out_data = OBF_STR("Refused");
           } else {
-            std::string accessToken = finalResult.substr(p1 + 1, p2 - p1 - 1);
-            std::string serverProof = finalResult.substr(p2 + 1, p3 - p2 - 1);
-            std::string authSig = finalResult.substr(p3 + 1);
-            std::string expectedProof = hmacSha256(key, challenge + "|" + accessToken);
-            if (serverProof != expectedProof || !verifySig(challenge + "|" + accessToken, authSig)) {
-              out_data = OBF_STR("Refused");
-            } else {
-              token = get_token_prefix() + accessToken + "|" + hmacSha256(key, accessToken);
-              out_data = accessToken;
-            }
+            token = get_token_prefix() + accessToken + "|" +
+                    hmacSha256(key, accessToken);
+            out_data = accessToken;
           }
+        }
       } else {
         out_data = OBF_STR("Refused");
       }
@@ -833,9 +914,9 @@ inline std::string authenticate(const std::string &key, std::string &out_data) {
   return token;
 }
 
-inline std::string g_sessionKey;
-inline std::string g_sessionHWID;
-inline bool g_sessionActive = false;
+std::string g_sessionKey;
+std::string g_sessionHWID;
+bool g_sessionActive = false;
 
 inline bool verify_session(const std::string &key) {
   if (!isTokenValid()) {
@@ -907,7 +988,8 @@ inline bool verify_session(const std::string &key) {
   size_t p2 = response.find('|', p1 + 1);
   size_t p3 = response.find('|', p2 + 1);
   size_t p4 = response.find('|', p3 + 1);
-  if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos || p4 == std::string::npos)
+  if (p1 == std::string::npos || p2 == std::string::npos ||
+      p3 == std::string::npos || p4 == std::string::npos)
     return false;
   std::string remaining = response.substr(p2 + 1, p3 - p2 - 1);
   std::string verifyProof = response.substr(p3 + 1, p4 - p3 - 1);
@@ -948,130 +1030,243 @@ inline std::vector<unsigned char> recvExact(MiniSsl &ssl, int n) {
     char tmp[4096];
     int toRead = (std::min)(n - (int)buf.size(), (int)sizeof(tmp));
     int r = ssl.Read(tmp, toRead);
-    if (r <= 0) return {};
+    if (r <= 0)
+      return {};
     buf.insert(buf.end(), tmp, tmp + r);
   }
   return buf;
 }
 
-inline std::vector<unsigned char> downloadFile(const std::string &key, const std::string &fileName) {
+inline std::vector<unsigned char> downloadFile(const std::string &key,
+                                               const std::string &fileName) {
   WSADATA wsaData;
-  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return {};
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    return {};
   struct addrinfo hints = {0}, *result = NULL;
-  hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; hints.ai_protocol = IPPROTO_TCP;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
   std::string srvHost = get_server_host();
-  if (getaddrinfo(srvHost.c_str(), std::to_string(get_server_port()).c_str(), &hints, &result) != 0) { WSACleanup(); return {}; }
-  SOCKET sockfd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-  if (sockfd == INVALID_SOCKET) { freeaddrinfo(result); WSACleanup(); return {}; }
+  if (getaddrinfo(srvHost.c_str(), std::to_string(get_server_port()).c_str(),
+                  &hints, &result) != 0) {
+    WSACleanup();
+    return {};
+  }
+  SOCKET sockfd =
+      socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+  if (sockfd == INVALID_SOCKET) {
+    freeaddrinfo(result);
+    WSACleanup();
+    return {};
+  }
   DWORD timeout = 30000;
-  setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
-  if (connect(sockfd, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) { closesocket(sockfd); freeaddrinfo(result); WSACleanup(); return {}; }
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
+             sizeof(timeout));
+  if (connect(sockfd, result->ai_addr, (int)result->ai_addrlen) ==
+      SOCKET_ERROR) {
+    closesocket(sockfd);
+    freeaddrinfo(result);
+    WSACleanup();
+    return {};
+  }
   freeaddrinfo(result);
   MiniSsl ssl(sockfd);
-  if (!ssl.Connect(srvHost)) { closesocket(sockfd); WSACleanup(); return {}; }
-  if (!verifyCertPin(ssl.getCtx())) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (!ssl.Connect(srvHost)) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
+  if (!verifyCertPin(ssl.getCtx())) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
 
   ssl.Write("6", 1);
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  std::string reqData = get_project_id() + "|" + key + "|" + getHWID() + "|" + fileName;
+  std::string reqData =
+      get_project_id() + "|" + key + "|" + getHWID() + "|" + fileName;
   ssl.Write(reqData.c_str(), (int)reqData.length());
 
   auto hdrLenRaw = recvExact(ssl, 4);
-  if (hdrLenRaw.size() != 4) { closesocket(sockfd); WSACleanup(); return {}; }
-  uint32_t hdrLen = ((uint32_t)hdrLenRaw[0] << 24) | ((uint32_t)hdrLenRaw[1] << 16) | ((uint32_t)hdrLenRaw[2] << 8) | hdrLenRaw[3];
-  if (hdrLen > 4096) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (hdrLenRaw.size() != 4) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
+  uint32_t hdrLen = ((uint32_t)hdrLenRaw[0] << 24) |
+                    ((uint32_t)hdrLenRaw[1] << 16) |
+                    ((uint32_t)hdrLenRaw[2] << 8) | hdrLenRaw[3];
+  if (hdrLen > 4096) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
   auto hdrBytes = recvExact(ssl, hdrLen);
-  if (hdrBytes.size() != hdrLen) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (hdrBytes.size() != hdrLen) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
   std::string header(hdrBytes.begin(), hdrBytes.end());
-  if (header.find("ERROR") == 0) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (header.find("ERROR") == 0) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
 
   std::vector<std::string> parts;
-  { std::istringstream iss(header); std::string part; while (std::getline(iss, part, '|')) parts.push_back(part); }
-  if (parts.size() < 5 || parts[0] != "FILE") { closesocket(sockfd); WSACleanup(); return {}; }
+  {
+    std::istringstream iss(header);
+    std::string part;
+    while (std::getline(iss, part, '|'))
+      parts.push_back(part);
+  }
+  if (parts.size() < 5 || parts[0] != "FILE") {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
   std::string nonceHex = parts[1], tagHex = parts[2], expectedHash = parts[3];
   int fileSize = std::stoi(parts[4]);
 
   auto bodyLenRaw = recvExact(ssl, 4);
-  if (bodyLenRaw.size() != 4) { closesocket(sockfd); WSACleanup(); return {}; }
-  uint32_t bodyLen = ((uint32_t)bodyLenRaw[0] << 24) | ((uint32_t)bodyLenRaw[1] << 16) | ((uint32_t)bodyLenRaw[2] << 8) | bodyLenRaw[3];
-  if (bodyLen > 60 * 1024 * 1024) { closesocket(sockfd); WSACleanup(); return {}; }
+  if (bodyLenRaw.size() != 4) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
+  uint32_t bodyLen = ((uint32_t)bodyLenRaw[0] << 24) |
+                     ((uint32_t)bodyLenRaw[1] << 16) |
+                     ((uint32_t)bodyLenRaw[2] << 8) | bodyLenRaw[3];
+  if (bodyLen > 60 * 1024 * 1024) {
+    closesocket(sockfd);
+    WSACleanup();
+    return {};
+  }
   auto body = recvExact(ssl, bodyLen);
-  closesocket(sockfd); WSACleanup();
-  if (body.size() != bodyLen) return {};
+  closesocket(sockfd);
+  WSACleanup();
+  if (body.size() != bodyLen)
+    return {};
 
   auto hexDecode = [](const std::string &h) -> std::vector<unsigned char> {
     std::vector<unsigned char> out;
     for (size_t i = 0; i + 1 < h.size(); i += 2) {
-      auto hv = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' : c >= 'a' && c <= 'f' ? 10+c-'a' : c >= 'A' && c <= 'F' ? 10+c-'A' : -1; };
-      int v1 = hv(h[i]), v2 = hv(h[i+1]); if (v1 < 0 || v2 < 0) return {};
-      out.push_back((unsigned char)(v1*16+v2));
+      auto hv = [](char c) -> int {
+        return c >= '0' && c <= '9'   ? c - '0'
+               : c >= 'a' && c <= 'f' ? 10 + c - 'a'
+               : c >= 'A' && c <= 'F' ? 10 + c - 'A'
+                                      : -1;
+      };
+      int v1 = hv(h[i]), v2 = hv(h[i + 1]);
+      if (v1 < 0 || v2 < 0)
+        return {};
+      out.push_back((unsigned char)(v1 * 16 + v2));
     }
     return out;
   };
 
   auto nonce = hexDecode(nonceHex);
   auto tag = hexDecode(tagHex);
-  if (nonce.size() != 12 || tag.size() != 16) return {};
+  if (nonce.size() != 12 || tag.size() != 16)
+    return {};
 
   std::string fileKeyData = "FILE_KEY:" + nonceHex;
   std::string fileKeyHex = hmacSha256(key, fileKeyData);
   auto fileKey = hexDecode(fileKeyHex);
-  if (fileKey.size() != 32) return {};
+  if (fileKey.size() != 32)
+    return {};
 
-  BCRYPT_ALG_HANDLE hAlg = NULL; BCRYPT_KEY_HANDLE hKey = NULL;
-  if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0))) return {};
-  if (!NT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) { BCryptCloseAlgorithmProvider(hAlg, 0); return {}; }
-  if (!NT_SUCCESS(BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, fileKey.data(), (ULONG)fileKey.size(), 0))) { BCryptCloseAlgorithmProvider(hAlg, 0); return {}; }
+  BCRYPT_ALG_HANDLE hAlg = NULL;
+  BCRYPT_KEY_HANDLE hKey = NULL;
+  if (!NT_SUCCESS(
+          BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0)))
+    return {};
+  if (!NT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE,
+                                    (PBYTE)BCRYPT_CHAIN_MODE_GCM,
+                                    sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) {
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return {};
+  }
+  if (!NT_SUCCESS(BCryptGenerateSymmetricKey(
+          hAlg, &hKey, NULL, 0, fileKey.data(), (ULONG)fileKey.size(), 0))) {
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return {};
+  }
 
   BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
   BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-  authInfo.pbNonce = nonce.data(); authInfo.cbNonce = (ULONG)nonce.size();
-  authInfo.pbTag = tag.data(); authInfo.cbTag = (ULONG)tag.size();
+  authInfo.pbNonce = nonce.data();
+  authInfo.cbNonce = (ULONG)nonce.size();
+  authInfo.pbTag = tag.data();
+  authInfo.cbTag = (ULONG)tag.size();
   std::string aadStr = get_project_id();
-  authInfo.pbAuthData = (PBYTE)aadStr.c_str(); authInfo.cbAuthData = (ULONG)aadStr.size();
+  authInfo.pbAuthData = (PBYTE)aadStr.c_str();
+  authInfo.cbAuthData = (ULONG)aadStr.size();
 
   DWORD cbResult = 0;
   std::vector<unsigned char> plaintext(body.size());
-  NTSTATUS status = BCryptDecrypt(hKey, body.data(), (ULONG)body.size(), &authInfo, NULL, 0, plaintext.data(), (ULONG)plaintext.size(), &cbResult, 0);
-  BCryptDestroyKey(hKey); BCryptCloseAlgorithmProvider(hAlg, 0);
-  if (!NT_SUCCESS(status)) return {};
+  NTSTATUS status =
+      BCryptDecrypt(hKey, body.data(), (ULONG)body.size(), &authInfo, NULL, 0,
+                    plaintext.data(), (ULONG)plaintext.size(), &cbResult, 0);
+  BCryptDestroyKey(hKey);
+  BCryptCloseAlgorithmProvider(hAlg, 0);
+  if (!NT_SUCCESS(status))
+    return {};
   plaintext.resize(cbResult);
 
-  std::string actualHash = sha256(std::string(plaintext.begin(), plaintext.end()));
-  if (actualHash != expectedHash || (int)plaintext.size() != fileSize) return {};
+  std::string actualHash =
+      sha256(std::string(plaintext.begin(), plaintext.end()));
+  if (actualHash != expectedHash || (int)plaintext.size() != fileSize)
+    return {};
   return plaintext;
 }
 
 inline void secureWipeFile(const std::wstring &path) {
-  HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (hFile != INVALID_HANDLE_VALUE) {
-    LARGE_INTEGER fileSize; GetFileSizeEx(hFile, &fileSize);
+    LARGE_INTEGER fileSize;
+    GetFileSizeEx(hFile, &fileSize);
     std::vector<BYTE> zeros((size_t)fileSize.QuadPart, 0);
-    DWORD written; WriteFile(hFile, zeros.data(), (DWORD)zeros.size(), &written, NULL);
-    FlushFileBuffers(hFile); CloseHandle(hFile);
+    DWORD written;
+    WriteFile(hFile, zeros.data(), (DWORD)zeros.size(), &written, NULL);
+    FlushFileBuffers(hFile);
+    CloseHandle(hFile);
   }
   DeleteFileW(path.c_str());
 }
 
-inline bool downloadAndRun(const std::string &key, const std::string &fileName) {
+inline bool downloadAndRun(const std::string &key,
+                           const std::string &fileName) {
   auto data = downloadFile(key, fileName);
-  if (data.empty()) return false;
+  if (data.empty())
+    return false;
 
   wchar_t tempPath[MAX_PATH];
   GetTempPathW(MAX_PATH, tempPath);
-  GUID guid; CoCreateGuid(&guid);
-  wchar_t guidStr[64]; swprintf_s(guidStr, L"_ka_%08x", guid.Data1);
+  GUID guid;
+  CoCreateGuid(&guid);
+  wchar_t guidStr[64];
+  swprintf_s(guidStr, L"_ka_%08x", guid.Data1);
   std::wstring randomDir = std::wstring(tempPath) + guidStr;
   CreateDirectoryW(randomDir.c_str(), NULL);
-  SetFileAttributesW(randomDir.c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+  SetFileAttributesW(randomDir.c_str(),
+                     FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
 
   std::wstring wFileName(fileName.begin(), fileName.end());
   std::wstring exePath = randomDir + L"\\" + wFileName;
 
-  HANDLE hFile = CreateFileW(exePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY, NULL);
-  if (hFile == INVALID_HANDLE_VALUE) return false;
-  DWORD written; WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL);
-  FlushFileBuffers(hFile); CloseHandle(hFile);
+  HANDLE hFile =
+      CreateFileW(exePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                  FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY, NULL);
+  if (hFile == INVALID_HANDLE_VALUE)
+    return false;
+  DWORD written;
+  WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL);
+  FlushFileBuffers(hFile);
+  CloseHandle(hFile);
 
   SecureZeroMemory(data.data(), data.size());
   data.clear();
@@ -1083,8 +1278,10 @@ inline bool downloadAndRun(const std::string &key, const std::string &fileName) 
   sei.lpFile = exePath.c_str();
   sei.lpDirectory = randomDir.c_str();
   sei.nShow = SW_SHOW;
-  if (!ShellExecuteExW(&sei)) return false;
-  if (sei.hProcess) CloseHandle(sei.hProcess);
+  if (!ShellExecuteExW(&sei))
+    return false;
+  if (sei.hProcess)
+    CloseHandle(sei.hProcess);
 
   std::wstring capExe = exePath, capDir = randomDir;
   std::thread([capExe, capDir]() {
@@ -1097,13 +1294,13 @@ inline bool downloadAndRun(const std::string &key, const std::string &fileName) 
   return true;
 }
 
-#ifndef KEYAUTH_HEADER_ONLY
 int main() {
   api_hide::check_debugger();
   api_hide::check_bad_processes();
 
   std::string key;
   std::cout << "Enter your license key: ";
+  std::cout.flush();
   std::getline(std::cin, key);
 
   std::string out_data;
@@ -1113,11 +1310,13 @@ int main() {
     std::cout << "Authenticated." << std::endl;
     StartSessionValidationThread(key);
   } else {
+    std::cout << "Authentication failed: " << out_data << std::endl;
+    std::cout << "Press Enter to exit...";
+    std::cin.get();
     return 1;
   }
 
+  std::cout << "Press Enter to exit...";
+  std::cin.get();
   return 0;
 }
-#endif
-
-#endif
