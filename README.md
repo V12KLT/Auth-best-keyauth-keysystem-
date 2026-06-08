@@ -1,3 +1,6 @@
+THIS IS FOR THE OLD VERSIONS THE NEW VERSIONS USE A WEBSITE INSTED OF A CLI AT -> https://keyauth.shop/
+
+
 JOIN OUR DISCORD FOR ALL NEW VERSIONS & INFO -> https://discord.gg/x2P52WwqWf
 
 [HOW TO USE.md](https://github.com/user-attachments/files/24622491/HOW.TO.USE.md)
